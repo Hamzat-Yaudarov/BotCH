@@ -306,24 +306,34 @@ class Database:
 
     async def has_accepted_terms(self, user_id: int) -> bool:
         """Проверить принял ли пользователь условия"""
-        async with self.pool.acquire() as conn:
-            result = await conn.fetchval(
-                "SELECT accepted_terms FROM users WHERE user_id = $1",
-                user_id
-            )
-            return result or False
+        try:
+            async with self.pool.acquire() as conn:
+                result = await conn.fetchval(
+                    "SELECT accepted_terms FROM users WHERE user_id = $1",
+                    user_id
+                )
+                accepted = result or False
+                logger.info(f"📋 Checking terms for user {user_id}: {accepted}")
+                return accepted
+        except Exception as e:
+            logger.error(f"❌ Error checking terms for user {user_id}: {e}")
+            return False
 
     async def set_terms_accepted(self, user_id: int) -> None:
         """Отметить что пользователь принял условия"""
-        async with self.pool.acquire() as conn:
-            await conn.execute(
-                """INSERT INTO users (user_id, accepted_terms)
-                   VALUES ($1, TRUE)
-                   ON CONFLICT (user_id) DO UPDATE SET
-                   accepted_terms = TRUE
-                """,
-                user_id
-            )
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """INSERT INTO users (user_id, accepted_terms)
+                       VALUES ($1, TRUE)
+                       ON CONFLICT (user_id) DO UPDATE SET
+                       accepted_terms = TRUE
+                    """,
+                    user_id
+                )
+                logger.info(f"✅ Terms accepted saved for user {user_id}")
+        except Exception as e:
+            logger.error(f"❌ Error saving terms acceptance for user {user_id}: {e}")
 
 
 # Глобальный объект БД

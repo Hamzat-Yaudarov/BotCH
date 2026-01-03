@@ -33,9 +33,13 @@ async def start(message: Message, state: FSMContext):
 
     # Проверяем принял ли пользователь условия (из БД, не из FSM)
     has_accepted = await db.has_accepted_terms(user_id)
+    print(f"DEBUG: /start command for user {user_id}, has_accepted={has_accepted}")
     if has_accepted:
+        print(f"DEBUG: User {user_id} already accepted, showing main menu")
         await show_main_menu(message, state)
         return
+
+    print(f"DEBUG: User {user_id} NOT accepted, showing terms")
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -59,9 +63,11 @@ async def start(message: Message, state: FSMContext):
 async def accept(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     user_id = callback.from_user.id
+    print(f"DEBUG: Accept callback for user {user_id}")
 
     # Сохраняем принятие условий в БД (постоянное хранилище)
     await db.set_terms_accepted(user_id)
+    print(f"DEBUG: Terms saved for user {user_id}")
 
     try:
         await callback.message.delete()
