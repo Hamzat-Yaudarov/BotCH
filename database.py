@@ -44,6 +44,25 @@ class Database:
         """Создание таблиц если их нет"""
         async with self.pool.acquire() as conn:
             logger.info("📋 Creating tables if they don't exist...")
+
+            # New multi-server client tracking table
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS user_clients_multi (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL,
+                    server_id VARCHAR(50) NOT NULL,
+                    uuid VARCHAR(255) NOT NULL,
+                    sub_id VARCHAR(255) NOT NULL,
+                    email VARCHAR(255) NOT NULL,
+                    expiry_time BIGINT NOT NULL DEFAULT 0,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(user_id, server_id),
+                    UNIQUE(sub_id),
+                    UNIQUE(email)
+                );
+            """)
+
+            # Legacy single-server table (for backward compatibility)
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS user_clients (
                     user_id BIGINT PRIMARY KEY,
@@ -136,12 +155,38 @@ class Database:
 
             logger.info("✅ Таблицы созданы/проверены")
 
-    # ===== User Clients =====
+    # ===== User Clients (Multi-Server) =====
 
-    async def get_user_client(self, user_id: int) -> Optional[Dict[str, Any]]:
-        """Получить данные клиента пользователя"""
+    async def get_user_client(self, user_id: int, server_id: str = None) -> Optional[Dict[str, Any]]:
+        """
+        Получить данные клиента пользователя
+
+        Args:
+            user_id: ID пользователя
+            server_id: ID сервера (если None, возвращает первого клиента)
+        """
         async with self.pool.acquire() as conn:
-            return await conn.fetchrow("SELECT * FROM user_clients WHERE user_id = $1", user_id)
+            if server_id:
+                # Get specific server client
+                return await conn.fetchrow(
+                    "SELECT * FROM user_clients_multi WHERE user_id = $1 AND server_id = $2",
+                    user_id, server_id
+                )
+            else:
+                # Get first client (any server) for backward compatibility
+                return await conn.fetchrow(
+                    "SELECT * FROM user_clients_multi WHERE user_id = $1 ORDER BY created_at LIMIT 1",
+                    user_id
+                )
+
+    async def get_user_clients(self, user_id: int) -> List[Dict[str, Any]]:
+        """Получить всех клиентов пользователя (на всех серверах)"""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM user_clients_multi WHERE user_id = $1 ORDER BY server_id",
+                user_id
+            )
+            return [dict(row) for row in rows]
 
     async def create_user_client(
         self,
@@ -149,31 +194,71 @@ class Database:
         uuid: str,
         sub_id: str,
         email: str,
+        server_id: str,
         expiry_time: int = 0
     ) -> None:
-        """Создать запись клиента"""
+        """
+        Создать или обновить запись клиента для конкретного сервера
+
+        Args:
+            user_id: ID пользователя
+            uuid: UUID клиента (одинаковый для всех серверов)
+            sub_id: ID подписки (уникален для каждого сервера)
+            email: Email клиента (одинаковый для всех серверов)
+            server_id: ID сервера
+            expiry_time: Время истечения в миллисекундах
+        """
         async with self.pool.acquire() as conn:
             await conn.execute(
-                """INSERT INTO user_clients (user_id, uuid, sub_id, email, expiry_time)
-                   VALUES ($1, $2, $3, $4, $5)
-                   ON CONFLICT (user_id) DO UPDATE SET
-                   uuid = $2, sub_id = $3, email = $4, expiry_time = $5
+                """INSERT INTO user_clients_multi (user_id, server_id, uuid, sub_id, email, expiry_time)
+                   VALUES ($1, $2, $3, $4, $5, $6)
+                   ON CONFLICT (user_id, server_id) DO UPDATE SET
+                   uuid = $3, sub_id = $4, email = $5, expiry_time = $6
                 """,
-                user_id, uuid, sub_id, email, expiry_time
+                user_id, server_id, uuid, sub_id, email, expiry_time
             )
 
-    async def update_user_client_expiry(self, user_id: int, expiry_time: int) -> None:
-        """Обновить время истечения подписки"""
-        async with self.pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE user_clients SET expiry_time = $1 WHERE user_id = $2",
-                expiry_time, user_id
-            )
+    async def update_user_client_expiry(self, user_id: int, expiry_time: int, server_id: str = None) -> None:
+        """
+        Обновить время истечения подписки
 
-    async def client_exists(self, user_id: int) -> bool:
-        """Проверить наличие клиента"""
+        Args:
+            user_id: ID пользователя
+            expiry_time: Новое время истечения
+            server_id: ID сервера (если None, обновляет для всех серверов)
+        """
         async with self.pool.acquire() as conn:
-            result = await conn.fetchval("SELECT COUNT(*) FROM user_clients WHERE user_id = $1", user_id)
+            if server_id:
+                await conn.execute(
+                    "UPDATE user_clients_multi SET expiry_time = $1 WHERE user_id = $2 AND server_id = $3",
+                    expiry_time, user_id, server_id
+                )
+            else:
+                # Update all servers
+                await conn.execute(
+                    "UPDATE user_clients_multi SET expiry_time = $1 WHERE user_id = $2",
+                    expiry_time, user_id
+                )
+
+    async def client_exists(self, user_id: int, server_id: str = None) -> bool:
+        """
+        Проверить наличие клиента
+
+        Args:
+            user_id: ID пользователя
+            server_id: ID сервера (если None, проверяет наличие на любом сервере)
+        """
+        async with self.pool.acquire() as conn:
+            if server_id:
+                result = await conn.fetchval(
+                    "SELECT COUNT(*) FROM user_clients_multi WHERE user_id = $1 AND server_id = $2",
+                    user_id, server_id
+                )
+            else:
+                result = await conn.fetchval(
+                    "SELECT COUNT(*) FROM user_clients_multi WHERE user_id = $1",
+                    user_id
+                )
             return result > 0
 
     # ===== Promo Codes =====
