@@ -46,6 +46,8 @@ class Database:
             logger.info("📋 Creating tables if they don't exist...")
 
             # New multi-server client tracking table
+            # ВАЖНО: ONE sub_id и email для ВСЕ серверов (одна подписка для всех)
+            # Поэтому нет UNIQUE ограничений на sub_id и email
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS user_clients_multi (
                     id SERIAL PRIMARY KEY,
@@ -56,9 +58,7 @@ class Database:
                     email VARCHAR(255) NOT NULL,
                     expiry_time BIGINT NOT NULL DEFAULT 0,
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(user_id, server_id),
-                    UNIQUE(sub_id),
-                    UNIQUE(email)
+                    UNIQUE(user_id, server_id)
                 );
             """)
 
