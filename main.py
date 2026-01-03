@@ -33,9 +33,20 @@ async def main():
     """Основная функция для запуска бота"""
 
     # Инициализируем БД
+    logger.info("=" * 60)
+    logger.info("🚀 BOT STARTING UP")
+    logger.info("=" * 60)
+
     logger.info("📦 Инициализация базы данных...")
     from config import DATABASE_URL
-    logger.info(f"DATABASE_URL: {DATABASE_URL[:50]}..." if DATABASE_URL else "DATABASE_URL not set!")
+
+    if DATABASE_URL:
+        db_display = DATABASE_URL[:40] + "..." if len(DATABASE_URL) > 40 else DATABASE_URL
+        logger.info(f"✅ DATABASE_URL found: {db_display}")
+    else:
+        logger.error("❌ DATABASE_URL is EMPTY or NOT SET!")
+        sys.exit(1)
+
     try:
         await db.initialize()
         logger.info("✅ База данных инициализирована успешно")
