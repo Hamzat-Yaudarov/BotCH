@@ -1,9 +1,13 @@
 import asyncio
 import logging
 import sys
+from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.enums import ParseMode
+
+# Загружаем переменные окружения из .env файла
+load_dotenv()
 
 from config import BOT_TOKEN, LOG_LEVEL
 from database import db
@@ -30,10 +34,15 @@ async def main():
 
     # Инициализируем БД
     logger.info("📦 Инициализация базы данных...")
+    from config import DATABASE_URL
+    logger.info(f"DATABASE_URL: {DATABASE_URL[:50]}..." if DATABASE_URL else "DATABASE_URL not set!")
     try:
         await db.initialize()
+        logger.info("✅ База данных инициализирована успешно")
     except Exception as e:
         logger.error(f"❌ Ошибка инициализации БД: {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
     # Создаём бота

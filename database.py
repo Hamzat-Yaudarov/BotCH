@@ -1,9 +1,10 @@
 import asyncpg
+import asyncpg
 import asyncio
+import logging
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from config import DATABASE_URL
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -17,11 +18,20 @@ class Database:
     async def initialize(self):
         """Инициализация подключения к БД и создание таблиц"""
         try:
+            logger.info(f"🔗 Connecting to database...")
+            logger.info(f"DATABASE_URL length: {len(DATABASE_URL) if DATABASE_URL else 0}")
+            if not DATABASE_URL:
+                logger.error("❌ DATABASE_URL is empty or not set!")
+                raise Exception("DATABASE_URL environment variable is not set")
+
             self.pool = await asyncpg.create_pool(DATABASE_URL, min_size=5, max_size=20)
             logger.info("✅ Подключение к Neon успешно")
             await self._create_tables()
+            logger.info("✅ Database initialized successfully")
         except Exception as e:
-            logger.error(f"❌ Ошибка подключения к БД: {e}")
+            logger.error(f"❌ Ошибка подключения к БД: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
             raise
 
     async def close(self):
@@ -33,6 +43,7 @@ class Database:
     async def _create_tables(self):
         """Создание таблиц если их нет"""
         async with self.pool.acquire() as conn:
+            logger.info("📋 Creating tables if they don't exist...")
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS user_clients (
                     user_id BIGINT PRIMARY KEY,
@@ -307,22 +318,33 @@ class Database:
     async def has_accepted_terms(self, user_id: int) -> bool:
         """Проверить принял ли пользователь условия"""
         try:
+            if not self.pool:
+                logger.error(f"❌ Database pool is None!")
+                return False
+
             async with self.pool.acquire() as conn:
                 result = await conn.fetchval(
                     "SELECT accepted_terms FROM users WHERE user_id = $1",
                     user_id
                 )
                 accepted = result or False
-                logger.info(f"📋 Checking terms for user {user_id}: {accepted}")
+                logger.info(f"✅ Checking terms for user {user_id}: accepted={accepted}")
                 return accepted
         except Exception as e:
-            logger.error(f"❌ Error checking terms for user {user_id}: {e}")
+            logger.error(f"❌ Error checking terms for user {user_id}: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
             return False
 
     async def set_terms_accepted(self, user_id: int) -> None:
         """Отметить что пользователь принял условия"""
         try:
+            if not self.pool:
+                logger.error(f"❌ Database pool is None!")
+                return
+
             async with self.pool.acquire() as conn:
+                logger.info(f"💾 Saving terms for user {user_id}...")
                 await conn.execute(
                     """INSERT INTO users (user_id, accepted_terms)
                        VALUES ($1, TRUE)
@@ -331,9 +353,11 @@ class Database:
                     """,
                     user_id
                 )
-                logger.info(f"✅ Terms accepted saved for user {user_id}")
+                logger.info(f"✅ Terms accepted saved successfully for user {user_id}")
         except Exception as e:
-            logger.error(f"❌ Error saving terms acceptance for user {user_id}: {e}")
+            logger.error(f"❌ Error saving terms acceptance for user {user_id}: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
 
 
 # Глобальный объект БД
