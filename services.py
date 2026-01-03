@@ -14,7 +14,7 @@ from db_models import (
     user_exists,
     create_promo_code,
     get_promo_code,
-    activate_promo_code,
+    activate_promo_code as activate_promo_code_db,
     add_referral,
     get_referrals,
     is_referrer_of,
@@ -115,16 +115,16 @@ async def add_promo_code(code: str, days: int, activations: int):
 async def activate_promo_code(code: str) -> tuple:
     """Activate promo code and return (success, days, message)"""
     promo = await get_promo_code(code)
-    
+
     if not promo:
         return False, 0, "❌ Промокод не найден или недействителен."
-    
+
     if promo["activations_left"] <= 0:
         return False, 0, "❌ Промокод исчерпан."
-    
+
     days = promo["days"]
-    await activate_promo_code(code)
-    
+    await activate_promo_code_db(code)
+
     return True, days, f"✅ Промокод активирован!\n+{days} дней к подписке"
 
 

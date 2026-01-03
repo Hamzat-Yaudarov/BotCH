@@ -108,7 +108,7 @@ async def referral(callback: CallbackQuery, bot: Bot):
     bot_username = (await bot.get_me()).username
     ref_link = f"https://t.me/{bot_username}?start={user_id}"
 
-    total_referred, paid_referred = get_referral_stats(user_id)
+    total_referred, paid_referred = await get_referral_stats(user_id)
 
     text = f"<b>🎁 Бонус за друга</b>\n\nВаша реферальная ссылка:\n<code>{ref_link}</code>\n\nПриглашено: <b>{total_referred}</b>\nКупили подписку: <b>{paid_referred}</b>\n\nЗа каждого купившего — <b>+7 дней</b> к вашей подписке!"
 
@@ -129,7 +129,7 @@ async def promo(callback: CallbackQuery, state: FSMContext):
 async def process_promo(message: Message, state: FSMContext):
     """Process promo code input"""
     code = message.text.strip().upper()
-    success, days, msg = activate_promo_code(code)
+    success, days, msg = await activate_promo_code(code)
     
     if success:
         months = days / 30
