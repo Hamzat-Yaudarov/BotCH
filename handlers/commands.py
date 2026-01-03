@@ -22,7 +22,7 @@ async def start(message: Message, state: FSMContext):
     if len(args) > 1:
         try:
             referrer_id = int(args[1])
-            add_referred_user(referrer_id, message.from_user.id)
+            await add_referred_user(referrer_id, message.from_user.id)
         except:
             pass
 

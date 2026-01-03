@@ -45,18 +45,8 @@ async def is_subscription_active(user_id: int) -> bool:
         return False
 
 
-def create_or_extend_client(user_id: int, add_months: float, is_paid: bool = False) -> str:
+async def create_or_extend_client(user_id: int, add_months: float, is_paid: bool = False) -> str:
     """Create new VPN client or extend existing subscription"""
-    # Synchronous function because xui_api is synchronous
-    # In production, consider making xui_api async
-    
-    import asyncio
-    loop = asyncio.get_event_loop()
-    return loop.run_until_complete(_create_or_extend_client_async(user_id, add_months, is_paid))
-
-
-async def _create_or_extend_client_async(user_id: int, add_months: float, is_paid: bool = False) -> str:
-    """Async version of create_or_extend_client"""
     current_user = await get_user(user_id)
     
     add_ms = int(add_months * 30 * 24 * 60 * 60 * 1000)
@@ -102,7 +92,7 @@ async def _create_or_extend_client_async(user_id: int, add_months: float, is_pai
             )
             if referrer:
                 # Give bonus to referrer
-                await _create_or_extend_client_async(referrer, REFERRAL_BONUS_DAYS / 30)
+                await create_or_extend_client(referrer, REFERRAL_BONUS_DAYS / 30)
     
     return sub_url
 

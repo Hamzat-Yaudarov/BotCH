@@ -89,7 +89,7 @@ async def check_gift(callback: CallbackQuery, bot: Bot):
     try:
         member = await bot.get_chat_member(NEWS_CHANNEL_ID, user_id)
         if member.status in ("member", "administrator", "creator"):
-            sub_url = create_or_extend_client(user_id, GIFT_DAYS / 30)
+            sub_url = await create_or_extend_client(user_id, GIFT_DAYS / 30)
             await add_user_gift_db(user_id)
             await callback.message.edit_text(
                 f"<b>🎉 Подарок получен!</b>\n+{GIFT_DAYS} дня к подписке\n\nВаша ссылка:\n<code>{sub_url}</code>"
@@ -133,7 +133,7 @@ async def process_promo(message: Message, state: FSMContext):
     
     if success:
         months = days / 30
-        sub_url = create_or_extend_client(message.from_user.id, months)
+        sub_url = await create_or_extend_client(message.from_user.id, months)
         await message.answer(f"{msg}\n\nВаша ссылка:\n<code>{sub_url}</code>")
     else:
         await message.answer(msg)
@@ -163,7 +163,7 @@ async def select_duration(callback: CallbackQuery, state: FSMContext):
 
     if user_id == OWNER_ID:
         try:
-            sub_url = create_or_extend_client(user_id, months)
+            sub_url = await create_or_extend_client(user_id, months)
             action = "продлена" if await is_subscription_active(user_id) else "создана"
             await callback.message.edit_text(f"<b>✅ Подписка {action} бесплатно!</b>\n\nВаша ссылка:\n<code>{sub_url}</code>")
         except Exception as e:
@@ -216,7 +216,7 @@ async def check_payment(callback: CallbackQuery, state: FSMContext):
     
     if await check_cryptobot_payment(invoice_id):
         try:
-            sub_url = create_or_extend_client(user_id, months, is_paid=True)
+            sub_url = await create_or_extend_client(user_id, months, is_paid=True)
             action = "продлена" if await is_subscription_active(user_id) else "оформлена"
             await callback.message.edit_text(f"<b>🎉 Оплата прошла успешно!</b>\nПодписка {action}\n\nВаша ссылка:\n<code>{sub_url}</code>")
         except Exception as e:
