@@ -1,3 +1,4 @@
+import logging
 from aiogram import Router, F, types, Bot
 from aiogram.filters.state import StateFilter
 from aiogram.fsm.context import FSMContext
@@ -10,7 +11,7 @@ from config import PRICES, OWNER_ID
 from utils import generate_random_string, calculate_expiry_time, calculate_remaining_time, get_current_timestamp_ms
 from xui_client import xui
 
-
+logger = logging.getLogger(__name__)
 router = Router()
 
 
@@ -192,7 +193,7 @@ async def create_or_extend_subscription(
         client_sub_id = client['sub_id']
         client_email = client['email']
 
-        current_expiry = xui.get_client_expiry(client_email)
+        current_expiry = xui.get_client_expiry_from_first_server(client_email)
         add_ms = int(add_months * 30 * 24 * 60 * 60 * 1000)
         new_expiry = current_expiry + add_ms
     else:
@@ -202,8 +203,9 @@ async def create_or_extend_subscription(
         client_email = generate_random_string(12)
         new_expiry = calculate_expiry_time(add_months)
 
-    # Обновляем/создаём клиента в XUI панели
-    xui.create_or_update_client(client_uuid, client_email, client_sub_id, new_expiry, user_id)
+    # Обновляем/создаём клиента на ВСЕ XUI панели одновременно
+    logger.info(f"📊 Создание подписки для user {user_id}: {client_email}")
+    xui.create_or_update_client_on_all_servers(client_uuid, client_email, client_sub_id, new_expiry, user_id)
 
     # Сохраняем в БД
     await db.create_user_client(user_id, client_uuid, client_sub_id, client_email, new_expiry)
@@ -224,4 +226,7 @@ async def create_or_extend_subscription(
             except Exception as e:
                 pass  # Silently fail if referrer bonus fails
 
-    return xui.get_subscription_url(client_sub_id)
+    # Возвращаем URL подписки (одинаковый для всех серверов - один sub_id на всех)
+    subscription_urls = xui.get_subscription_urls(client_sub_id)
+    logger.info(f"✅ Подписка создана для user {user_id}, URLs: {len(subscription_urls)} серверов")
+    return subscription_urls[0]  # Возвращаем первый URL (они всё ещё используют один sub_id)
