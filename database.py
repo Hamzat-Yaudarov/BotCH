@@ -134,6 +134,23 @@ class Database:
                 );
             """)
 
+            # Добавляем колонку accepted_terms если её нет (миграция)
+            try:
+                column_exists = await conn.fetchval("""
+                    SELECT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='users' AND column_name='accepted_terms'
+                    )
+                """)
+
+                if not column_exists:
+                    await conn.execute("""
+                        ALTER TABLE users ADD COLUMN accepted_terms BOOLEAN NOT NULL DEFAULT FALSE;
+                    """)
+                    logger.info("✅ Колонка 'accepted_terms' добавлена в таблицу 'users'")
+            except Exception as e:
+                logger.error(f"⚠️ Ошибка при добавлении колонки 'accepted_terms': {e}")
+
             logger.info("✅ Таблицы созданы/проверены")
 
     # ===== User Clients =====
