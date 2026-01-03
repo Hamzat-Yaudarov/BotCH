@@ -21,17 +21,19 @@ router = Router()
 async def start(message: Message, state: FSMContext):
     args = message.text.split()
     referrer_id = None
+    user_id = message.from_user.id
 
     if len(args) > 1:
         try:
             referrer_id = int(args[1])
-            if referrer_id != message.from_user.id:
-                await db.add_referral(referrer_id, message.from_user.id)
+            if referrer_id != user_id:
+                await db.add_referral(referrer_id, user_id)
         except:
             pass
 
-    data = await state.get_data()
-    if data.get("accepted"):
+    # Проверяем принял ли пользователь условия (из БД, не из FSM)
+    has_accepted = await db.has_accepted_terms(user_id)
+    if has_accepted:
         await show_main_menu(message, state)
         return
 
@@ -56,7 +58,10 @@ async def start(message: Message, state: FSMContext):
 @router.callback_query(F.data == "accept")
 async def accept(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
-    await state.update_data(accepted=True)
+    user_id = callback.from_user.id
+
+    # Сохраняем принятие условий в БД (постоянное хранилище)
+    await db.set_terms_accepted(user_id)
 
     try:
         await callback.message.delete()

@@ -115,6 +115,14 @@ class Database:
                 );
             """)
 
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id BIGINT PRIMARY KEY,
+                    accepted_terms BOOLEAN NOT NULL DEFAULT FALSE,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+
             logger.info("✅ Таблицы созданы/проверены")
 
     # ===== User Clients =====
@@ -293,6 +301,29 @@ class Database:
                 user_id
             )
             return result
+
+    # ===== Terms Acceptance =====
+
+    async def has_accepted_terms(self, user_id: int) -> bool:
+        """Проверить принял ли пользователь условия"""
+        async with self.pool.acquire() as conn:
+            result = await conn.fetchval(
+                "SELECT accepted_terms FROM users WHERE user_id = $1",
+                user_id
+            )
+            return result or False
+
+    async def set_terms_accepted(self, user_id: int) -> None:
+        """Отметить что пользователь принял условия"""
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO users (user_id, accepted_terms)
+                   VALUES ($1, TRUE)
+                   ON CONFLICT (user_id) DO UPDATE SET
+                   accepted_terms = TRUE
+                """,
+                user_id
+            )
 
 
 # Глобальный объект БД
