@@ -6,6 +6,7 @@ from config import (
     REFERRAL_BONUS_DAYS,
     GIFT_DAYS,
 )
+from database import pool
 from xui_api import create_client, update_client, get_client_expiry
 from utils import generate_random_string
 from db_models import (
@@ -85,7 +86,7 @@ async def create_or_extend_client(user_id: int, add_months: float, is_paid: bool
         # We need to find who referred this user
         # This requires a reverse lookup, which we can do by checking all users' referrals
         # For efficiency, we should add a reverse_referrer column, but for now we'll do a query
-        async with __import__('database').pool.acquire() as conn:
+        async with pool.acquire() as conn:
             referrer = await conn.fetchval(
                 "SELECT referrer_id FROM referrals WHERE referred_user_id = $1",
                 user_id
