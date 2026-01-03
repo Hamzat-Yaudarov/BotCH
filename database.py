@@ -127,29 +127,12 @@ class Database:
             """)
 
             await conn.execute("""
-                CREATE TABLE IF NOT EXISTS users (
+                CREATE TABLE IF NOT EXISTS user_terms_acceptance (
                     user_id BIGINT PRIMARY KEY,
                     accepted_terms BOOLEAN NOT NULL DEFAULT FALSE,
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
             """)
-
-            # Добавляем колонку accepted_terms если её нет (миграция)
-            try:
-                column_exists = await conn.fetchval("""
-                    SELECT EXISTS (
-                        SELECT 1 FROM information_schema.columns
-                        WHERE table_name='users' AND column_name='accepted_terms'
-                    )
-                """)
-
-                if not column_exists:
-                    await conn.execute("""
-                        ALTER TABLE users ADD COLUMN accepted_terms BOOLEAN NOT NULL DEFAULT FALSE;
-                    """)
-                    logger.info("✅ Колонка 'accepted_terms' добавлена в таблицу 'users'")
-            except Exception as e:
-                logger.error(f"⚠️ Ошибка при добавлении колонки 'accepted_terms': {e}")
 
             logger.info("✅ Таблицы созданы/проверены")
 
@@ -341,7 +324,7 @@ class Database:
 
             async with self.pool.acquire() as conn:
                 result = await conn.fetchval(
-                    "SELECT accepted_terms FROM users WHERE user_id = $1",
+                    "SELECT accepted_terms FROM user_terms_acceptance WHERE user_id = $1",
                     user_id
                 )
                 accepted = result or False
@@ -363,7 +346,7 @@ class Database:
             async with self.pool.acquire() as conn:
                 logger.info(f"💾 Saving terms for user {user_id}...")
                 await conn.execute(
-                    """INSERT INTO users (user_id, accepted_terms)
+                    """INSERT INTO user_terms_acceptance (user_id, accepted_terms)
                        VALUES ($1, TRUE)
                        ON CONFLICT (user_id) DO UPDATE SET
                        accepted_terms = TRUE
