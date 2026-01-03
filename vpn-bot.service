@@ -1,0 +1,43 @@
+[Unit]
+# Описание сервиса
+Description=SPN VPN Telegram Bot Service
+# После какого события запускать (после сетевого стека)
+After=network.target
+
+[Service]
+# Тип сервиса: simple = основной процесс, не форкится
+Type=simple
+
+# От какого пользователя запускать (для безопасности)
+User=vpnbot
+
+# Рабочая директория (где находится код)
+WorkingDirectory=/home/vpnbot/vpn_bot
+
+# Путь к виртуальному окружению Python
+Environment="PATH=/home/vpnbot/vpn_bot/venv/bin"
+
+# Загрузить переменные окружения из .env файла
+EnvironmentFile=/home/vpnbot/vpn_bot/.env
+
+# Команда для запуска бота
+ExecStart=/home/vpnbot/vpn_bot/venv/bin/python3 /home/vpnbot/vpn_bot/vpn_bot.py
+
+# Политика перезапуска:
+# always = перезапускать всегда при сбое
+Restart=always
+
+# Время между попытками перезапуска (в секундах)
+RestartSec=10
+
+# Стандартный вывод и ошибки в журнал systemd
+StandardOutput=journal
+StandardError=journal
+
+# Идентификатор в логах
+SyslogIdentifier=vpn-bot
+
+[Install]
+# Когда включать при загрузке системы
+# multi-user.target = обычный режим (не графический интерфейс)
+WantedBy=multi-user.target
