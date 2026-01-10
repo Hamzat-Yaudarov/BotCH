@@ -11,6 +11,7 @@ from services.remnawave import (
     remnawave_add_to_squad
 )
 
+logger = logging.getLogger(__name__)
 
 router = Router()
 
@@ -23,94 +24,141 @@ def is_admin(user_id: int) -> bool:
 @router.message(Command("new_code"))
 async def admin_new_code(message: Message):
     """Админ команда: создать новый промокод"""
-    if not is_admin(message.from_user.id):
+    admin_id = message.from_user.id
+
+    if not is_admin(admin_id):
+        await message.answer("❌ Эта команда доступна только администратору")
+        logger.warning(f"User {admin_id} tried to use /new_code without admin permissions")
         return
 
     try:
         parts = message.text.split()
         if len(parts) < 4:
             raise ValueError("Not enough arguments")
-        
-        _, code, days, limit = parts[0], parts[1], int(parts[2]), int(parts[3])
-    except (ValueError, IndexError):
-        await message.answer("Формат:\n/new_code CODE DAYS LIMIT\n\nПример:\n/new_code SUMMER30 30 100")
+
+        code = parts[1]
+        days = int(parts[2])
+        limit = int(parts[3])
+
+        if days <= 0 or limit <= 0:
+            raise ValueError("Days and limit must be positive numbers")
+
+    except (ValueError, IndexError) as e:
+        await message.answer(
+            "❌ Неверный формат команды\n\n"
+            "<b>Формат:</b> /new_code КОД ДНЕЙ ЛИМИТ\n\n"
+            "<b>Пример:</b> /new_code SUMMER30 30 100"
+        )
+        logger.error(f"Admin {admin_id} /new_code parsing error: {e}")
         return
 
-    # Создаём промокод
-    db.create_promo_code(code.upper(), days, limit)
+    try:
+        # Создаём промокод
+        db.create_promo_code(code.upper(), days, limit)
 
-    await message.answer(
-        f"✅ Промокод создан:\n\n"
-        f"Код: {code.upper()}\n"
-        f"Дней: {days}\n"
-        f"Лимит использований: {limit}"
-    )
-    
-    logging.info(f"Admin {message.from_user.id} created promo code {code.upper()}")
+        await message.answer(
+            f"✅ <b>Промокод создан успешно</b>\n\n"
+            f"<b>Код:</b> <code>{code.upper()}</code>\n"
+            f"<b>Дней подписки:</b> {days}\n"
+            f"<b>Лимит использований:</b> {limit}"
+        )
+
+        logger.info(f"Admin {admin_id} created promo code: {code.upper()} (days={days}, limit={limit})")
+
+    except Exception as e:
+        await message.answer(f"❌ Ошибка при создании промокода: {str(e)}")
+        logger.error(f"Admin {admin_id} /new_code error: {e}")
 
 
 @router.message(Command("give_sub"))
 async def admin_give_sub(message: Message):
-    """Админ команда: выдать подписку пользователю"""
-    if not is_admin(message.from_user.id):
+    """Админ команда: выдать/продлить подписку пользователю по ИД"""
+    admin_id = message.from_user.id
+
+    if not is_admin(admin_id):
+        await message.answer("❌ Эта команда доступна только администратору")
+        logger.warning(f"User {admin_id} tried to use /give_sub without admin permissions")
         return
 
     try:
         parts = message.text.split()
         if len(parts) < 3:
             raise ValueError("Not enough arguments")
-        
-        _, tg_id_str, days_str = parts[0], parts[1], int(parts[2])
+
+        tg_id_str = parts[1]
+        days_str = parts[2]
+
         tg_id = int(tg_id_str)
-    except (ValueError, IndexError):
-        await message.answer("Формат:\n/give_sub TG_ID DAYS\n\nПример:\n/give_sub 123456789 30")
+        days = int(days_str)
+
+        if days <= 0:
+            raise ValueError("Days must be a positive number")
+
+    except (ValueError, IndexError) as e:
+        await message.answer(
+            "❌ Неверный формат команды\n\n"
+            "<b>Формат:</b> /give_sub ТГ_ИД ДНЕЙ\n\n"
+            "<b>Пример:</b> /give_sub 123456789 30"
+        )
+        logger.error(f"Admin {admin_id} /give_sub parsing error: {e}")
         return
 
     if not db.acquire_user_lock(tg_id):
-        await message.answer("❌ Пользователь занят, попробуй позже")
+        await message.answer(f"❌ Пользователь {tg_id} занят, попробуй позже")
         return
 
     try:
+        # Убедимся что пользователь существует в БД
+        if not db.user_exists(tg_id):
+            db.create_user(tg_id, f"user_{tg_id}")
+            logger.info(f"Created new user {tg_id} in database")
+
         connector = aiohttp.TCPConnector(ssl=False)
         async with aiohttp.ClientSession(connector=connector) as session:
             # Создаём или получаем пользователя в Remnawave
             uuid, username = await remnawave_get_or_create_user(
-                session, tg_id, days=days_str, extend_if_exists=True
+                session, tg_id, days=days, extend_if_exists=True
             )
 
             if not uuid:
-                await message.answer("❌ Ошибка при работе с Remnawave API")
+                await message.answer(f"❌ Ошибка при работе с Remnawave API для пользователя {tg_id}")
+                logger.error(f"Failed to get/create Remnawave user for TG {tg_id}")
                 return
 
             # Добавляем в сквад
-            await remnawave_add_to_squad(session, uuid)
+            squad_added = await remnawave_add_to_squad(session, uuid)
+            if not squad_added:
+                logger.warning(f"Failed to add user {uuid} to squad, continuing anyway")
 
             # Обновляем подписку в БД
-            new_until = (datetime.now(timezone.utc) + timedelta(days=days_str)).isoformat()
+            new_until = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
             db.update_subscription(tg_id, uuid, username, new_until, DEFAULT_SQUAD_UUID)
 
         await message.answer(
-            f"✅ Подписка выдана:\n\n"
-            f"Пользователь: {tg_id}\n"
-            f"Дней: {days_str}"
+            f"✅ <b>Подписка выдана успешно</b>\n\n"
+            f"<b>Пользователь:</b> {tg_id}\n"
+            f"<b>Дней:</b> {days}\n"
+            f"<b>Remnawave UUID:</b> <code>{uuid}</code>"
         )
-        
+
         # Уведомляем пользователя
         try:
             await message.bot.send_message(
                 tg_id,
-                f"🎉 Вам выдана подписка на {days_str} дней!\n\n"
-                f"Спасибо за использование сервиса SPN VPN!"
+                f"🎉 <b>Поздравляем!</b>\n\n"
+                f"Вам выдана подписка SPN VPN на <b>{days} дней</b>\n\n"
+                f"Спасибо за использование нашего сервиса! 🚀"
             )
+            logger.info(f"User {tg_id} notified about subscription")
         except Exception as e:
-            logging.warning(f"Failed to notify user {tg_id}: {e}")
-        
-        logging.info(f"Admin {message.from_user.id} gave subscription to {tg_id} for {days_str} days")
+            logger.warning(f"Failed to notify user {tg_id}: {e}")
+
+        logger.info(f"Admin {admin_id} gave subscription to user {tg_id} for {days} days")
 
     except Exception as e:
-        logging.error(f"Give subscription error: {e}")
-        await message.answer(f"❌ Ошибка: {str(e)}")
-    
+        logger.error(f"Give subscription error: {e}")
+        await message.answer(f"❌ Ошибка при выдаче подписки: {str(e)}")
+
     finally:
         db.release_user_lock(tg_id)
 
@@ -118,8 +166,12 @@ async def admin_give_sub(message: Message):
 @router.message(Command("stats"))
 async def admin_stats(message: Message):
     """Админ команда: получить статистику"""
-    if not is_admin(message.from_user.id):
+    admin_id = message.from_user.id
+
+    if not is_admin(admin_id):
+        await message.answer("❌ Эта команда доступна только администратору")
+        logger.warning(f"User {admin_id} tried to use /stats without admin permissions")
         return
 
-    # TODO: Реализовать получение статистики
-    await message.answer("Статистика ещё не реализована")
+    # TODO: Реализовать получение статистики из БД
+    await message.answer("📊 Статистика ещё не реализована\n\nВ разработке...")
