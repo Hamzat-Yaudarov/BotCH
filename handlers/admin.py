@@ -1,151 +1,125 @@
-from aiogram import Router, F, types, Bot
-from aiogram.filters import Command, CommandObject
-
-from database import db
-from config import OWNER_ID
-from handlers.subscription import create_or_extend_subscription
-from xui_client import xui
+import logging
+import aiohttp
+from datetime import datetime, timedelta, timezone
+from aiogram import Router
+from aiogram.filters import Command
+from aiogram.types import Message
+from config import ADMIN_ID, DEFAULT_SQUAD_UUID
+import database as db
+from services.remnawave import (
+    remnawave_get_or_create_user,
+    remnawave_add_to_squad
+)
 
 
 router = Router()
 
 
-@router.message(Command("newcode"))
-async def newcode(message: types.Message, command: CommandObject):
-    """Команда для создания нового промокода (только для админа)"""
-    if message.from_user.id != OWNER_ID:
-        return
-
-    args = command.args
-    if not args:
-        await message.answer(
-            "<b>📝 Создание промокода</b>\n\n"
-            "<b>Использование:</b>\n"
-            "<code>/newcode КОД ДНЕЙ АКТИВАЦИЙ</code>\n\n"
-            "<b>Пример:</b>\n"
-            "<code>/newcode SUMMER2024 30 100</code>\n\n"
-            "Это создаст промокод SUMMER2024 на 30 дней с 100 активациями"
-        )
-        return
-
-    parts = args.split()
-    if len(parts) != 3:
-        await message.answer(
-            "<b>❌ Ошибка</b>\n\n"
-            "Укажите точно 3 параметра: КОД, ДНЕЙ, АКТИВАЦИЙ"
-        )
-        return
-
-    code = parts[0].upper()
-    try:
-        days = int(parts[1])
-        activations = int(parts[2])
-    except:
-        await message.answer(
-            "<b>❌ Ошибка</b>\n\n"
-            "Дни и активации должны быть числами"
-        )
-        return
-
-    await db.create_promo_code(code, days, activations)
-    await message.answer(
-        "<b>✅ Промокод создан</b>\n\n"
-        f"<b>Код:</b> {code}\n"
-        f"<b>Дней:</b> {days}\n"
-        f"<b>Активаций:</b> {activations}"
-    )
+def is_admin(user_id: int) -> bool:
+    """Проверить является ли пользователь администратором"""
+    return user_id == ADMIN_ID
 
 
-@router.message(Command("givesub"))
-async def givesub(message: types.Message, command: CommandObject):
-    """Команда для выдачи подписки пользователю (только для админа)"""
-    if message.from_user.id != OWNER_ID:
-        return
-
-    args = command.args
-    if not args:
-        await message.answer(
-            "<b>🎁 Выдача подписки пользователю</b>\n\n"
-            "<b>Использование:</b>\n"
-            "<code>/givesub USER_ID ДНЕЙ</code>\n\n"
-            "<b>Пример:</b>\n"
-            "<code>/givesub 123456789 30</code>\n\n"
-            "Это выдаст пользователю с ID 123456789 подписку на 30 дней"
-        )
-        return
-
-    parts = args.split()
-    if len(parts) != 2:
-        await message.answer(
-            "<b>❌ Ошибка</b>\n\n"
-            "Укажите точно 2 параметра: USER_ID, ДНЕЙ"
-        )
+@router.message(Command("new_code"))
+async def admin_new_code(message: Message):
+    """Админ команда: создать новый промокод"""
+    if not is_admin(message.from_user.id):
         return
 
     try:
-        target_id = int(parts[0])
-        days = int(parts[1])
-    except:
-        await message.answer(
-            "<b>❌ Ошибка</b>\n\n"
-            "USER_ID и дни должны быть числами"
-        )
+        parts = message.text.split()
+        if len(parts) < 4:
+            raise ValueError("Not enough arguments")
+        
+        _, code, days, limit = parts[0], parts[1], int(parts[2]), int(parts[3])
+    except (ValueError, IndexError):
+        await message.answer("Формат:\n/new_code CODE DAYS LIMIT\n\nПример:\n/new_code SUMMER30 30 100")
         return
 
-    try:
-        months = days / 30
-        sub_url = await create_or_extend_subscription(target_id, months)
-        await message.answer(
-            "<b>✅ Подписка выдана</b>\n\n"
-            f"<b>Пользователь:</b> {target_id}\n"
-            f"<b>Дней:</b> {days}\n\n"
-            "<b>Ссылка подписки:</b>\n"
-            f"<code>{sub_url}</code>"
-        )
-    except Exception as e:
-        await message.answer(
-            "<b>❌ Ошибка</b>\n\n"
-            "Не удалось выдать подписку. Проверьте ID пользователя."
-        )
-
-
-@router.message(Command("message"))
-async def admin_message(message: types.Message, command: CommandObject, bot: Bot):
-    """Команда для массовой рассылки сообщений (только для админа)"""
-    if message.from_user.id != OWNER_ID:
-        return
-
-    text = command.args
-    if not text:
-        await message.answer(
-            "<b>📢 Массовая рассылка</b>\n\n"
-            "<b>Использование:</b>\n"
-            "<code>/message ТЕКСТ_СООБЩЕНИЯ</code>\n\n"
-            "<b>Пример:</b>\n"
-            "<code>/message Привет! Это сообщение от администратора</code>"
-        )
-        return
-
-    user_ids = await db.get_all_user_ids()
-    success_count = 0
-    failed_count = 0
+    # Создаём промокод
+    db.create_promo_code(code.upper(), days, limit)
 
     await message.answer(
-        "<b>📊 Рассылка начата</b>\n\n"
-        f"Отправляю сообщение {len(user_ids)} пользователям...\n\n"
-        "<i>Это может занять некоторое время</i>"
+        f"✅ Промокод создан:\n\n"
+        f"Код: {code.upper()}\n"
+        f"Дней: {days}\n"
+        f"Лимит использований: {limit}"
     )
+    
+    logging.info(f"Admin {message.from_user.id} created promo code {code.upper()}")
 
-    for user_id in user_ids:
+
+@router.message(Command("give_sub"))
+async def admin_give_sub(message: Message):
+    """Админ команда: выдать подписку пользователю"""
+    if not is_admin(message.from_user.id):
+        return
+
+    try:
+        parts = message.text.split()
+        if len(parts) < 3:
+            raise ValueError("Not enough arguments")
+        
+        _, tg_id_str, days_str = parts[0], parts[1], int(parts[2])
+        tg_id = int(tg_id_str)
+    except (ValueError, IndexError):
+        await message.answer("Формат:\n/give_sub TG_ID DAYS\n\nПример:\n/give_sub 123456789 30")
+        return
+
+    if not db.acquire_user_lock(tg_id):
+        await message.answer("❌ Пользователь занят, попробуй позже")
+        return
+
+    try:
+        connector = aiohttp.TCPConnector(ssl=False)
+        async with aiohttp.ClientSession(connector=connector) as session:
+            # Создаём или получаем пользователя в Remnawave
+            uuid, username = await remnawave_get_or_create_user(
+                session, tg_id, days=days_str, extend_if_exists=True
+            )
+
+            if not uuid:
+                await message.answer("❌ Ошибка при работе с Remnawave API")
+                return
+
+            # Добавляем в сквад
+            await remnawave_add_to_squad(session, uuid)
+
+            # Обновляем подписку в БД
+            new_until = (datetime.now(timezone.utc) + timedelta(days=days_str)).isoformat()
+            db.update_subscription(tg_id, uuid, username, new_until, DEFAULT_SQUAD_UUID)
+
+        await message.answer(
+            f"✅ Подписка выдана:\n\n"
+            f"Пользователь: {tg_id}\n"
+            f"Дней: {days_str}"
+        )
+        
+        # Уведомляем пользователя
         try:
-            await bot.send_message(user_id, text, parse_mode="HTML")
-            success_count += 1
-        except:
-            failed_count += 1
+            await message.bot.send_message(
+                tg_id,
+                f"🎉 Вам выдана подписка на {days_str} дней!\n\n"
+                f"Спасибо за использование сервиса SPN VPN!"
+            )
+        except Exception as e:
+            logging.warning(f"Failed to notify user {tg_id}: {e}")
+        
+        logging.info(f"Admin {message.from_user.id} gave subscription to {tg_id} for {days_str} days")
 
-    await message.answer(
-        "<b>✅ Рассылка завершена</b>\n\n"
-        f"<b>Успешно отправлено:</b> {success_count}\n"
-        f"<b>Ошибок:</b> {failed_count}\n"
-        f"<b>Всего пользователей:</b> {len(user_ids)}"
-    )
+    except Exception as e:
+        logging.error(f"Give subscription error: {e}")
+        await message.answer(f"❌ Ошибка: {str(e)}")
+    
+    finally:
+        db.release_user_lock(tg_id)
+
+
+@router.message(Command("stats"))
+async def admin_stats(message: Message):
+    """Админ команда: получить статистику"""
+    if not is_admin(message.from_user.id):
+        return
+
+    # TODO: Реализовать получение статистики
+    await message.answer("Статистика ещё не реализована")

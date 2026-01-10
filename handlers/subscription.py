@@ -1,232 +1,198 @@
 import logging
-from aiogram import Router, F, types, Bot
-from aiogram.filters.state import StateFilter
+import aiohttp
+from datetime import datetime, timedelta, timezone
+from aiogram import Router
+from aiogram.filters import F
 from aiogram.fsm.context import FSMContext
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from config import TARIFFS, DEFAULT_SQUAD_UUID
+from states import UserStates
+import database as db
+from services.remnawave import remnawave_get_subscription_url
+from services.cryptobot import create_cryptobot_invoice, get_invoice_status, process_paid_invoice
 
-from states import SubscriptionState
-from database import db
-from payment import payment
-from config import PRICES, OWNER_ID
-from utils import generate_random_string, calculate_expiry_time, calculate_remaining_time, get_current_timestamp_ms
-from xui_client import xui
 
-logger = logging.getLogger(__name__)
 router = Router()
 
 
-@router.callback_query(F.data == "subscribe")
-async def subscribe(callback: CallbackQuery, state: FSMContext):
-    """Начало процесса подписки"""
-    await callback.answer()
+@router.callback_query(F.data == "buy_subscription")
+async def process_buy_subscription(callback: CallbackQuery, state: FSMContext):
+    """Показать выбор тарифов"""
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="1 месяц — 100₽", callback_data="tariff_1m")],
+        [InlineKeyboardButton(text="3 месяца — 249₽", callback_data="tariff_3m")],
+        [InlineKeyboardButton(text="6 месяцев — 449₽", callback_data="tariff_6m")],
+        [InlineKeyboardButton(text="12 месяцев — 990₽", callback_data="tariff_12m")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
+    ])
 
-    inline_keyboard = []
-    for months, price in PRICES.items():
-        inline_keyboard.append([InlineKeyboardButton(text=f"{months} мес. — {price} ₽", callback_data=f"duration_{months}")])
-    inline_keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")])
-
-    keyboard = InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
-    await callback.message.edit_text(
-        "<b>📅 Выберите срок подписки</b>\n\n"
-        "Чем дольше подписка, тем больше экономия!",
-        reply_markup=keyboard
-    )
-    await state.set_state(SubscriptionState.select_duration)
+    await callback.message.edit_text("Выбери срок подписки:", reply_markup=kb)
+    await state.set_state(UserStates.choosing_tariff)
 
 
-@router.callback_query(StateFilter(SubscriptionState.select_duration), F.data.startswith("duration_"))
-async def select_duration(callback: CallbackQuery, state: FSMContext, bot: Bot):
-    """Выбор срока подписки"""
-    await callback.answer()
-    user_id = callback.from_user.id
-    months = int(callback.data.split("_")[1])
+@router.callback_query(F.data.startswith("tariff_"))
+async def process_tariff_choice(callback: CallbackQuery, state: FSMContext):
+    """Обработать выбор тарифа"""
+    tariff_code = callback.data.split("_")[1]
+    await state.update_data(tariff_code=tariff_code)
 
-    # Проверяем владелец ли это
-    if user_id == OWNER_ID:
-        try:
-            await create_or_extend_subscription(user_id, months)
-            client = await db.get_user_client(user_id)
-            sub_url = xui.get_subscription_url(client['sub_id'])
+    tariff = TARIFFS[tariff_code]
 
-            existing = await db.client_exists(user_id)
-            action = "продлена" if existing else "создана"
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💎 CryptoBot", callback_data="pay_cryptobot")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="buy_subscription")]
+    ])
 
-            await callback.message.edit_text(
-                f"<b>✅ Подписка {action} бесплатно!</b>\n\n"
-                "Ссылка для подключения:\n"
-                f"<code>{sub_url}</code>"
-            )
-        except Exception as e:
-            await callback.message.edit_text(
-                "<b>⚠️ Ошибка</b>\n\n"
-                "Произошла ошибка при создании подписки. "
-                "Пожалуйста, попробуйте позже."
-            )
+    text = f"<b>Оплата тарифа {tariff_code}</b>\nСумма: {tariff['price']} ₽\n\nВыбери способ оплаты:"
+
+    await callback.message.edit_text(text, reply_markup=kb)
+    await state.set_state(UserStates.choosing_payment)
+
+
+@router.callback_query(F.data == "pay_cryptobot")
+async def process_pay_cryptobot(callback: CallbackQuery, state: FSMContext):
+    """Создать счёт в CryptoBot"""
+    data = await state.get_data()
+    tariff_code = data.get("tariff_code")
+    
+    if not tariff_code:
+        await callback.message.edit_text("Ошибка: тариф не выбран")
         await state.clear()
         return
 
-    # Обычный пользователь - переходим к оплате
-    await state.update_data(months=months, price=PRICES[months])
-    inline_keyboard = [
-        [InlineKeyboardButton(text="💳 Оплатить через CryptoBot", callback_data="pay_cryptobot")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")]
-    ]
-    keyboard = InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
-    await callback.message.edit_text(
-        "<b>💰 Оплата подписки</b>\n\n"
-        f"<b>Период:</b> {months} месяцев\n"
-        f"<b>Сумма:</b> {PRICES[months]} ₽\n\n"
-        "Выберите способ оплаты:",
-        reply_markup=keyboard
+    tariff = TARIFFS[tariff_code]
+    amount = tariff["price"]
+
+    # Создаём счёт в CryptoBot
+    invoice = await create_cryptobot_invoice(callback.bot, amount, tariff_code, callback.from_user.id)
+    
+    if not invoice:
+        await callback.message.edit_text("Ошибка создания счёта в CryptoBot. Попробуй позже.")
+        await state.clear()
+        return
+
+    invoice_id = invoice["invoice_id"]
+    pay_url = invoice["bot_invoice_url"]
+
+    # Записываем платеж в БД
+    db.create_payment(
+        callback.from_user.id,
+        tariff_code,
+        amount,
+        "cryptobot",
+        invoice_id
     )
-    await state.set_state(SubscriptionState.select_payment)
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Оплатить сейчас", url=pay_url)],
+        [InlineKeyboardButton(text="Проверить оплату", callback_data="check_payment")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="buy_subscription")]
+    ])
+
+    text = (
+        f"<b>Счёт на оплату</b>\n\n"
+        f"Тариф: {tariff_code}\n"
+        f"Сумма: {amount} ₽\n\n"
+        "Оплати через CryptoBot. После оплаты бот автоматически активирует подписку.\n"
+        "Если не активировалось — нажми «Проверить оплату»"
+    )
+
+    await callback.message.edit_text(text, reply_markup=kb)
+    await state.clear()
 
 
-@router.callback_query(StateFilter(SubscriptionState.select_payment), F.data == "pay_cryptobot")
-async def pay_cryptobot(callback: CallbackQuery, state: FSMContext, bot: Bot):
-    """Создание счёта в CryptoBot"""
-    await callback.answer()
+@router.callback_query(F.data == "check_payment")
+async def process_check_payment(callback: CallbackQuery):
+    """Проверить статус платежа"""
+    tg_id = callback.from_user.id
+    pending = db.get_last_pending_payment(tg_id)
+
+    if not pending:
+        await callback.answer("Нет ожидающих оплаты счетов", show_alert=True)
+        return
+
+    if not db.acquire_user_lock(tg_id):
+        await callback.answer("Подожди пару секунд ⏳", show_alert=True)
+        return
 
     try:
-        data = await state.get_data()
-        months = data['months']
-        price = data['price']
-        order_id = generate_random_string(10)
-        bot_username = (await bot.get_me()).username
+        invoice_id, tariff_code = pending
 
-        pay_url, invoice_id = await payment.create_invoice(price, order_id, bot_username)
-        await state.update_data(invoice_id=invoice_id, pay_url=pay_url)
+        # Проверяем статус счёта
+        invoice = await get_invoice_status(invoice_id)
 
-        inline_keyboard = [
-            [InlineKeyboardButton(text="💸 Перейти к оплате", url=pay_url)],
-            [InlineKeyboardButton(text="✅ Проверить оплату", callback_data="check_payment")]
-        ]
-        keyboard = InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
-        await callback.message.edit_text(
-            "<b>💳 Оплата готова</b>\n\n"
-            "Нажмите кнопку ниже, чтобы перейти к оплате.\n\n"
-            "<i>После успешной оплаты нажмите «Проверить оплату»</i>",
-            reply_markup=keyboard
-        )
-        await state.set_state(SubscriptionState.waiting_payment)
+        if invoice and invoice.get("status") == "paid":
+            # Обрабатываем оплату
+            success = await process_paid_invoice(callback.bot, tg_id, invoice_id, tariff_code)
+            
+            if success:
+                await callback.message.edit_text(
+                    "✅ <b>Оплата подтверждена!</b>\n\n"
+                    f"Тариф: {tariff_code}\n"
+                    "Ссылка подписки отправлена в сообщении выше."
+                )
+            else:
+                await callback.answer("Ошибка при активации подписки", show_alert=True)
+        else:
+            await callback.answer("Оплата ещё не прошла или уже активирована", show_alert=True)
+
     except Exception as e:
+        logging.error(f"Check payment error: {e}")
+        await callback.answer("Ошибка при проверке платежа", show_alert=True)
+    
+    finally:
+        db.release_user_lock(tg_id)
+
+
+@router.callback_query(F.data == "my_subscription")
+async def process_my_subscription(callback: CallbackQuery):
+    """Показать информацию о подписке пользователя"""
+    tg_id = callback.from_user.id
+    user = db.get_user(tg_id)
+
+    if not user or not user[3]:  # remnawave_uuid
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Оформить подписку", callback_data="buy_subscription")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
+        ])
         await callback.message.edit_text(
-            "<b>⚠️ Ошибка</b>\n\n"
-            "Не удалось создать счёт на оплату. "
-            "Пожалуйста, попробуйте позже или свяжитесь с поддержкой."
+            "У тебя пока нет активной подписки.\nОформи её сейчас!",
+            reply_markup=kb
         )
+        return
 
+    # Получаем информацию о подписке
+    connector = aiohttp.TCPConnector(ssl=False)
+    async with aiohttp.ClientSession(connector=connector) as session:
+        sub_url = await remnawave_get_subscription_url(session, user[3])
 
-@router.callback_query(StateFilter(SubscriptionState.waiting_payment), F.data == "check_payment")
-async def check_payment(callback: CallbackQuery, state: FSMContext):
-    """Проверка статуса платежа"""
-    await callback.answer()
+    # Вычисляем оставшееся время
+    try:
+        expire_at = user[5] or datetime.now(timezone.utc).isoformat()
+        exp_date = datetime.fromisoformat(expire_at.replace('Z', '+00:00'))
+        remaining = exp_date - datetime.now(timezone.utc)
+        
+        if remaining.total_seconds() <= 0:
+            remaining_str = "истекла"
+        else:
+            days = remaining.days
+            hours = remaining.seconds // 3600
+            minutes = (remaining.seconds % 3600) // 60
+            remaining_str = f"{days}д {hours}ч {minutes}м"
+    except Exception:
+        remaining_str = "неизвестно"
 
-    data = await state.get_data()
-    invoice_id = data['invoice_id']
-    pay_url = data.get('pay_url')
-    months = data['months']
-    user_id = callback.from_user.id
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Продлить подписку", callback_data="buy_subscription")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
+    ])
 
-    is_paid = await payment.check_payment(invoice_id)
+    text = (
+        "🔐 <b>Моя подписка</b>\n\n"
+        f"📆 Осталось ещё: {remaining_str}\n"
+        f"Сквад: SPN-Squad\n\n"
+        f"<b>Ссылка (кликабельно):</b>\n{sub_url or 'ошибка получения ссылки'}\n\n"
+        "Статус: активна"
+    )
 
-    if is_paid:
-        try:
-            await create_or_extend_subscription(user_id, months, is_paid=True)
-            client = await db.get_user_client(user_id)
-            sub_url = xui.get_subscription_url(client['sub_id'])
-
-            await callback.message.edit_text(
-                "<b>🎉 Платёж прошёл успешно!</b>\n\n"
-                f"<b>Подписка активирована на {months} месяцев</b>\n\n"
-                "Ссылка для подключения:\n"
-                f"<code>{sub_url}</code>\n\n"
-                "<i>Скопируйте ссылку в приложение VPN</i>"
-            )
-        except Exception as e:
-            await callback.message.edit_text(
-                "<b>⚠️ Ошибка активации</b>\n\n"
-                "Платёж прошёл, но произошла ошибка при активации подписки. "
-                "Свяжитесь с поддержкой, указав номер счёта."
-            )
-        await state.clear()
-    else:
-        inline_keyboard = [
-            [InlineKeyboardButton(text="💸 Перейти к оплате", url=pay_url)],
-            [InlineKeyboardButton(text="✅ Проверить ещё раз", callback_data="check_payment")]
-        ]
-        keyboard = InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
-        await callback.message.edit_text(
-            "<b>⏳ Платёж не найден</b>\n\n"
-            "Мы не обнаружили вашего платежа. Возможно, он ещё обрабатывается.\n\n"
-            "Попробуйте:\n"
-            "1. Проверить ещё раз через 30 секунд\n"
-            "2. Убедиться, что оплата прошла\n"
-            "3. Свяжитесь с поддержкой, если проблема сохранится",
-            reply_markup=keyboard
-        )
-
-
-async def create_or_extend_subscription(
-    user_id: int,
-    add_months: float,
-    is_paid: bool = False
-) -> str:
-    """
-    Создать или продлить подписку пользователя
-
-    Args:
-        user_id: ID пользователя
-        add_months: Количество месяцев для добавления
-        is_paid: Была ли оплачена подписка
-
-    Returns:
-        URL подписки
-    """
-    from utils import generate_uuid
-
-    client = await db.get_user_client(user_id)
-
-    if client:
-        # Продлеваем существующую подписку
-        client_uuid = client['uuid']
-        client_sub_id = client['sub_id']
-        client_email = client['email']
-
-        current_expiry = xui.get_client_expiry_from_first_server(client_email)
-        add_ms = int(add_months * 30 * 24 * 60 * 60 * 1000)
-        new_expiry = current_expiry + add_ms
-    else:
-        # Создаём новую подписку
-        client_uuid = generate_uuid()
-        client_sub_id = generate_random_string(16)
-        client_email = generate_random_string(12)
-        new_expiry = calculate_expiry_time(add_months)
-
-    # Обновляем/создаём клиента на ВСЕ XUI панели одновременно
-    logger.info(f"📊 Создание подписки для user {user_id}: {client_email}")
-    xui.create_or_update_client_on_all_servers(client_uuid, client_email, client_sub_id, new_expiry, user_id)
-
-    # Сохраняем в БД
-    await db.create_user_client(user_id, client_uuid, client_sub_id, client_email, new_expiry)
-
-    # Если оплачено - отмечаем пользователя и даём бонус рефереру
-    if is_paid:
-        # Определяем сумму платежа (только для стандартных пакетов)
-        months_int = int(add_months)
-        amount = PRICES.get(months_int, 0)
-
-        await db.mark_user_paid(user_id, amount, f"invoice_{user_id}_{get_current_timestamp_ms()}")
-
-        # Даём бонус рефереру (+7 дней)
-        referrer_id = await db.get_referrer_id(user_id)
-        if referrer_id:
-            try:
-                await create_or_extend_subscription(referrer_id, 7 / 30)  # 7 дней
-            except Exception as e:
-                pass  # Silently fail if referrer bonus fails
-
-    # Возвращаем URL подписки (одинаковый для всех серверов - один sub_id на всех)
-    subscription_urls = xui.get_subscription_urls(client_sub_id)
-    logger.info(f"✅ Подписка создана для user {user_id}, URLs: {len(subscription_urls)} серверов")
-    return subscription_urls[0]  # Возвращаем первый URL (они всё ещё используют один sub_id)
+    await callback.message.edit_text(text, reply_markup=kb)

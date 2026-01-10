@@ -1,86 +1,100 @@
-from aiogram import Router, F, types
-from aiogram.filters.state import StateFilter
+import logging
+import aiohttp
+from datetime import datetime, timedelta, timezone
+from aiogram import Router
+from aiogram.filters import F
 from aiogram.fsm.context import FSMContext
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-
-from states import SubscriptionState
-from database import db
-from handlers.subscription import create_or_extend_subscription
-from xui_client import xui
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from config import DEFAULT_SQUAD_UUID
+from states import UserStates
+import database as db
+from services.remnawave import (
+    remnawave_get_or_create_user,
+    remnawave_add_to_squad,
+    remnawave_get_subscription_url
+)
+from handlers.start import show_main_menu
 
 
 router = Router()
 
 
-@router.callback_query(F.data == "promo")
-async def promo(callback: types.CallbackQuery, state: FSMContext):
-    """Показать окно ввода промокода"""
-    await callback.answer()
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")]])
-    await callback.message.edit_text(
-        "<b>🎟️ Активировать промокод</b>\n\n"
-        "Если у вас есть промокод, введите его ниже:",
-        reply_markup=keyboard
-    )
-    await state.set_state(SubscriptionState.enter_promo)
+@router.callback_query(F.data == "enter_promo")
+async def process_enter_promo(callback: CallbackQuery, state: FSMContext):
+    """Предложить ввести промокод"""
+    await callback.message.edit_text("Введи промокод:")
+    await state.set_state(UserStates.waiting_for_promo)
 
 
-@router.message(StateFilter(SubscriptionState.enter_promo))
-async def process_promo(message: types.Message, state: FSMContext):
-    """Обработить введённый промокод"""
+@router.message(UserStates.waiting_for_promo)
+async def process_promo_input(message: Message, state: FSMContext):
+    """Обработать введённый промокод"""
     code = message.text.strip().upper()
+    tg_id = message.from_user.id
 
-    promo = await db.get_promo_code(code)
-
-    if not promo:
-        await message.answer(
-            "<b>❌ Промокод не найден</b>\n\n"
-            "Убедитесь, что вы правильно ввели код. "
-            "Если проблема сохранится, свяжитесь с поддержкой."
-        )
-        await state.clear()
+    if not db.acquire_user_lock(tg_id):
+        await message.answer("Подожди пару секунд ⏳")
         return
-
-    if promo['activations_left'] <= 0:
-        await message.answer(
-            "<b>❌ Промокод истёк</b>\n\n"
-            "К сожалению, этот промокод больше не доступен. "
-            "Попробуйте другой код или оформите платную подписку."
-        )
-        await state.clear()
-        return
-
-    # Используем промокод
-    used = await db.use_promo_code(code)
-    if not used:
-        await message.answer(
-            "<b>❌ Ошибка активации</b>\n\n"
-            "Не удалось активировать промокод. Попробуйте позже."
-        )
-        await state.clear()
-        return
-
-    # Создаём/продлеваем подписку
-    days = promo['days']
-    months = days / 30
 
     try:
-        await create_or_extend_subscription(message.from_user.id, months)
-        client = await db.get_user_client(message.from_user.id)
-        sub_url = xui.get_subscription_url(client['sub_id'])
+        # Проверяем промокод в БД
+        promo = db.get_promo_code(code)
 
+        if not promo or not promo[3] or promo[2] >= promo[1]:  # active и used_count < max_uses
+            await message.answer("❌ Неверный или исчерпанный промокод")
+            await state.clear()
+            await show_main_menu(message)
+            return
+
+        days = promo[0]
+
+        # Создаём или получаем пользователя в Remnawave
+        connector = aiohttp.TCPConnector(ssl=False)
+        async with aiohttp.ClientSession(connector=connector) as session:
+            uuid, username = await remnawave_get_or_create_user(
+                session, tg_id, days=days, extend_if_exists=True
+            )
+
+            if not uuid:
+                await message.answer("❌ Ошибка при применении промокода")
+                await state.clear()
+                await show_main_menu(message)
+                return
+
+            # Добавляем в сквад
+            await remnawave_add_to_squad(session, uuid)
+            
+            # Получаем ссылку подписки
+            sub_url = await remnawave_get_subscription_url(session, uuid)
+
+            if not sub_url:
+                await message.answer("❌ Ошибка при получении ссылки подписки")
+                await state.clear()
+                await show_main_menu(message)
+                return
+
+        # Обновляем промокод (увеличиваем счётчик использования)
+        db.increment_promo_usage(code)
+
+        # Обновляем подписку пользователя в БД
+        new_until = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
+        db.update_subscription(tg_id, uuid, username, new_until, DEFAULT_SQUAD_UUID)
+
+        # Отправляем успешное сообщение
         await message.answer(
-            "<b>✅ Промокод успешно активирован!</b>\n\n"
-            f"<b>Добавлено:</b> +{days} дней\n\n"
-            "Ссылка для подключения:\n"
-            f"<code>{sub_url}</code>\n\n"
-            "<i>Скопируйте ссылку в приложение VPN</i>"
+            f"✅ <b>Промокод активирован!</b>\n\n"
+            f"Добавлено {days} дней подписки\n\n"
+            f"<b>Ссылка подписки:</b>\n<code>{sub_url}</code>"
         )
+        
+        logging.info(f"Promo code {code} applied by user {tg_id}")
+
     except Exception as e:
-        await message.answer(
-            "<b>⚠️ Ошибка при активации</b>\n\n"
-            "Промокод активирован, но произошла ошибка при создании подписки. "
-            "Свяжитесь с поддержкой."
-        )
+        logging.error(f"Promo error: {e}")
+        await message.answer("❌ Ошибка при применении промокода")
+    
+    finally:
+        db.release_user_lock(tg_id)
 
     await state.clear()
+    await show_main_menu(message)

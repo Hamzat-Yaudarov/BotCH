@@ -1,449 +1,320 @@
-import asyncpg
-import asyncpg
-import asyncio
+import sqlite3
 import logging
-from typing import Optional, List, Dict, Any
-from datetime import datetime
-from config import DATABASE_URL
-
-logger = logging.getLogger(__name__)
+from config import DB_FILE
 
 
-class Database:
-    """Класс для работы с PostgreSQL базой данных Neon"""
+def init_db():
+    """Инициализация базы данных с необходимыми таблицами"""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
 
-    def __init__(self):
-        self.pool: Optional[asyncpg.Pool] = None
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            tg_id INTEGER PRIMARY KEY,
+            username TEXT,
+            accepted_terms BOOLEAN DEFAULT FALSE,
+            remnawave_uuid TEXT,
+            remnawave_username TEXT,
+            subscription_until TEXT,
+            squad_uuid TEXT,
+            referrer_id INTEGER,
+            gift_received BOOLEAN DEFAULT FALSE,
+            referral_count INTEGER DEFAULT 0,
+            active_referrals INTEGER DEFAULT 0,
+            first_payment BOOLEAN DEFAULT FALSE,
+            action_lock INTEGER DEFAULT 0
+        )
+    ''')
 
-    async def initialize(self):
-        """Инициализация подключения к БД и создание таблиц"""
-        try:
-            logger.info(f"🔗 Connecting to database...")
-            logger.info(f"DATABASE_URL length: {len(DATABASE_URL) if DATABASE_URL else 0}")
-            if not DATABASE_URL:
-                logger.error("❌ DATABASE_URL is empty or not set!")
-                raise Exception("DATABASE_URL environment variable is not set")
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tg_id INTEGER,
+            tariff_code TEXT,
+            amount REAL,
+            status TEXT DEFAULT 'pending',
+            created_at TEXT,
+            provider TEXT,
+            invoice_id TEXT,
+            payload TEXT
+        )
+    ''')
 
-            self.pool = await asyncpg.create_pool(DATABASE_URL, min_size=5, max_size=20)
-            logger.info("✅ Подключение к Neon успешно")
-            await self._create_tables()
-            logger.info("✅ Database initialized successfully")
-        except Exception as e:
-            logger.error(f"❌ Ошибка подключения к БД: {type(e).__name__}: {e}")
-            import traceback
-            traceback.print_exc()
-            raise
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS promo_codes (
+            code TEXT PRIMARY KEY,
+            days INTEGER,
+            max_uses INTEGER,
+            used_count INTEGER DEFAULT 0,
+            active BOOLEAN DEFAULT TRUE
+        )
+    ''')
 
-    async def close(self):
-        """Закрытие соединения с БД"""
-        if self.pool:
-            await self.pool.close()
-            logger.info("✅ Соединение с БД закрыто")
+    conn.commit()
+    conn.close()
+    logging.info("Database initialized successfully")
 
-    async def _create_tables(self):
-        """Создание таблиц если их нет"""
-        async with self.pool.acquire() as conn:
-            logger.info("📋 Creating tables if they don't exist...")
 
-            # New multi-server client tracking table
-            # ВАЖНО: ONE sub_id и email для ВСЕ серверов (одна подписка для всех)
-            # Поэтому нет UNIQUE ограничений на sub_id и email
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS user_clients_multi (
-                    id SERIAL PRIMARY KEY,
-                    user_id BIGINT NOT NULL,
-                    server_id VARCHAR(50) NOT NULL,
-                    uuid VARCHAR(255) NOT NULL,
-                    sub_id VARCHAR(255) NOT NULL,
-                    email VARCHAR(255) NOT NULL,
-                    expiry_time BIGINT NOT NULL DEFAULT 0,
-                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(user_id, server_id)
-                );
-            """)
+def db_execute(query, params=(), fetchone=False, fetchall=False, commit=False):
+    """
+    Выполнить SQL запрос к базе данных
+    
+    Args:
+        query: SQL запрос
+        params: Параметры для запроса (кортеж)
+        fetchone: Получить одну строку результата
+        fetchall: Получить все строки результата
+        commit: Коммитить изменения в БД
+        
+    Returns:
+        Результат запроса или None
+    """
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute(query, params)
+    
+    if fetchone:
+        result = cursor.fetchone()
+    elif fetchall:
+        result = cursor.fetchall()
+    else:
+        result = None
+    
+    if commit:
+        conn.commit()
+    
+    conn.close()
+    return result
 
-            # Legacy single-server table (for backward compatibility)
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS user_clients (
-                    user_id BIGINT PRIMARY KEY,
-                    uuid VARCHAR(255) NOT NULL,
-                    sub_id VARCHAR(255) NOT NULL UNIQUE,
-                    email VARCHAR(255) NOT NULL UNIQUE,
-                    expiry_time BIGINT NOT NULL DEFAULT 0,
-                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-                );
-            """)
 
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS promo_codes (
-                    code VARCHAR(50) PRIMARY KEY,
-                    days INT NOT NULL,
-                    activations_left INT NOT NULL,
-                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-                );
-            """)
+def acquire_user_lock(tg_id: int) -> bool:
+    """
+    Атомарно блокирует пользователя.
+    Возвращает True если блок получен, False если уже занят.
+    
+    Args:
+        tg_id: ID пользователя Telegram
+        
+    Returns:
+        True если удалось получить блокировку, False иначе
+    """
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
 
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS referrals (
-                    id SERIAL PRIMARY KEY,
-                    referrer_id BIGINT NOT NULL,
-                    referred_user_id BIGINT NOT NULL,
-                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(referrer_id, referred_user_id)
-                );
-            """)
+    cursor.execute("""
+        UPDATE users
+        SET action_lock = 1
+        WHERE tg_id = ? AND action_lock = 0
+    """, (tg_id,))
 
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS paid_users (
-                    id SERIAL PRIMARY KEY,
-                    user_id BIGINT NOT NULL,
-                    invoice_id VARCHAR(255) NOT NULL UNIQUE,
-                    paid_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-                );
-            """)
+    changed = cursor.rowcount
+    conn.commit()
+    conn.close()
 
-            # Добавляем колонку amount если её нет (для существующих таблиц)
-            try:
-                # Проверяем, существует ли колонка
-                column_exists = await conn.fetchval("""
-                    SELECT EXISTS (
-                        SELECT 1 FROM information_schema.columns
-                        WHERE table_name='paid_users' AND column_name='amount'
-                    )
-                """)
+    return changed == 1
 
-                if not column_exists:
-                    await conn.execute("""
-                        ALTER TABLE paid_users ADD COLUMN amount INT NOT NULL DEFAULT 0;
-                    """)
-                    logger.info("✅ Колонка 'amount' добавлена в таблицу 'paid_users'")
-            except Exception as e:
-                logger.error(f"⚠️ Ошибка при добавлении колонки 'amount': {e}")
 
-            # Добавляем колонку invoice_id если её нет (для существующих таблиц)
-            try:
-                # Проверяем, существует ли колонка
-                column_exists = await conn.fetchval("""
-                    SELECT EXISTS (
-                        SELECT 1 FROM information_schema.columns
-                        WHERE table_name='paid_users' AND column_name='invoice_id'
-                    )
-                """)
+def release_user_lock(tg_id: int):
+    """
+    Освобождает блокировку пользователя
+    
+    Args:
+        tg_id: ID пользователя Telegram
+    """
+    db_execute(
+        "UPDATE users SET action_lock = 0 WHERE tg_id = ?",
+        (tg_id,),
+        commit=True
+    )
 
-                if not column_exists:
-                    await conn.execute("""
-                        ALTER TABLE paid_users ADD COLUMN invoice_id VARCHAR(255) UNIQUE DEFAULT NULL;
-                    """)
-                    logger.info("✅ Колонка 'invoice_id' добавлена в таблицу 'paid_users'")
-            except Exception as e:
-                logger.error(f"⚠️ Ошибка при добавлении колонки 'invoice_id': {e}")
 
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS user_gifts (
-                    user_id BIGINT PRIMARY KEY,
-                    received_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-                );
-            """)
+# User management
+def get_user(tg_id: int):
+    """Получить информацию о пользователе"""
+    return db_execute("SELECT * FROM users WHERE tg_id = ?", (tg_id,), fetchone=True)
 
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS user_terms_acceptance (
-                    user_id BIGINT PRIMARY KEY,
-                    accepted_terms BOOLEAN NOT NULL DEFAULT FALSE,
-                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-                );
-            """)
 
-            logger.info("✅ Таблицы созданы/проверены")
+def user_exists(tg_id: int) -> bool:
+    """Проверить существует ли пользователь"""
+    result = db_execute("SELECT 1 FROM users WHERE tg_id = ?", (tg_id,), fetchone=True)
+    return result is not None
 
-    # ===== User Clients (Multi-Server) =====
 
-    async def get_user_client(self, user_id: int, server_id: str = None) -> Optional[Dict[str, Any]]:
+def create_user(tg_id: int, username: str, referrer_id=None):
+    """Создать или игнорировать пользователя"""
+    db_execute(
+        "INSERT OR IGNORE INTO users (tg_id, username, referrer_id) VALUES (?, ?, ?)",
+        (tg_id, username, referrer_id),
+        commit=True
+    )
+
+
+# Terms and conditions
+def accept_terms(tg_id: int):
+    """Пользователь принял условия использования"""
+    db_execute(
+        "UPDATE users SET accepted_terms = TRUE WHERE tg_id = ?",
+        (tg_id,),
+        commit=True
+    )
+
+
+def has_accepted_terms(tg_id: int) -> bool:
+    """Проверить принял ли пользователь условия"""
+    user = get_user(tg_id)
+    return user and user[2]  # accepted_terms column
+
+
+# Subscription management
+def update_subscription(tg_id: int, uuid: str, username: str, subscription_until: str, squad_uuid: str):
+    """Обновить подписку пользователя"""
+    db_execute(
+        "UPDATE users SET remnawave_uuid = ?, remnawave_username = ?, subscription_until = ?, squad_uuid = ? WHERE tg_id = ?",
+        (uuid, username, subscription_until, squad_uuid, tg_id),
+        commit=True
+    )
+
+
+def has_subscription(tg_id: int) -> bool:
+    """Проверить есть ли активная подписка"""
+    user = get_user(tg_id)
+    return user and user[3] is not None  # remnawave_uuid column
+
+
+# Payment management
+def create_payment(tg_id: int, tariff_code: str, amount: float, provider: str, invoice_id: str):
+    """Создать запись о платеже"""
+    from datetime import datetime
+    db_execute(
         """
-        Получить данные клиента пользователя
-
-        Args:
-            user_id: ID пользователя
-            server_id: ID сервера (если None, возвращает первого клиента)
-        """
-        async with self.pool.acquire() as conn:
-            if server_id:
-                # Get specific server client
-                return await conn.fetchrow(
-                    "SELECT * FROM user_clients_multi WHERE user_id = $1 AND server_id = $2",
-                    user_id, server_id
-                )
-            else:
-                # Get first client (any server) for backward compatibility
-                return await conn.fetchrow(
-                    "SELECT * FROM user_clients_multi WHERE user_id = $1 ORDER BY created_at LIMIT 1",
-                    user_id
-                )
-
-    async def get_user_clients(self, user_id: int) -> List[Dict[str, Any]]:
-        """Получить всех клиентов пользователя (на всех серверах)"""
-        async with self.pool.acquire() as conn:
-            rows = await conn.fetch(
-                "SELECT * FROM user_clients_multi WHERE user_id = $1 ORDER BY server_id",
-                user_id
-            )
-            return [dict(row) for row in rows]
-
-    async def create_user_client(
-        self,
-        user_id: int,
-        uuid: str,
-        sub_id: str,
-        email: str,
-        server_id: str,
-        expiry_time: int = 0
-    ) -> None:
-        """
-        Создать или обновить запись клиента для конкретного сервера
-
-        Args:
-            user_id: ID пользователя
-            uuid: UUID клиента (одинаковый для всех серверов)
-            sub_id: ID подписки (уникален для каждого сервера)
-            email: Email клиента (одинаковый для всех серверов)
-            server_id: ID сервера
-            expiry_time: Время истечения в миллисекундах
-        """
-        async with self.pool.acquire() as conn:
-            await conn.execute(
-                """INSERT INTO user_clients_multi (user_id, server_id, uuid, sub_id, email, expiry_time)
-                   VALUES ($1, $2, $3, $4, $5, $6)
-                   ON CONFLICT (user_id, server_id) DO UPDATE SET
-                   uuid = $3, sub_id = $4, email = $5, expiry_time = $6
-                """,
-                user_id, server_id, uuid, sub_id, email, expiry_time
-            )
-
-    async def update_user_client_expiry(self, user_id: int, expiry_time: int, server_id: str = None) -> None:
-        """
-        Обновить время истечения подписки
-
-        Args:
-            user_id: ID пользователя
-            expiry_time: Новое время истечения
-            server_id: ID сервера (если None, обновляет для всех серверов)
-        """
-        async with self.pool.acquire() as conn:
-            if server_id:
-                await conn.execute(
-                    "UPDATE user_clients_multi SET expiry_time = $1 WHERE user_id = $2 AND server_id = $3",
-                    expiry_time, user_id, server_id
-                )
-            else:
-                # Update all servers
-                await conn.execute(
-                    "UPDATE user_clients_multi SET expiry_time = $1 WHERE user_id = $2",
-                    expiry_time, user_id
-                )
-
-    async def client_exists(self, user_id: int, server_id: str = None) -> bool:
-        """
-        Проверить наличие клиента
-
-        Args:
-            user_id: ID пользователя
-            server_id: ID сервера (если None, проверяет наличие на любом сервере)
-        """
-        async with self.pool.acquire() as conn:
-            if server_id:
-                result = await conn.fetchval(
-                    "SELECT COUNT(*) FROM user_clients_multi WHERE user_id = $1 AND server_id = $2",
-                    user_id, server_id
-                )
-            else:
-                result = await conn.fetchval(
-                    "SELECT COUNT(*) FROM user_clients_multi WHERE user_id = $1",
-                    user_id
-                )
-            return result > 0
-
-    # ===== Promo Codes =====
-
-    async def get_promo_code(self, code: str) -> Optional[Dict[str, Any]]:
-        """Получить промокод"""
-        async with self.pool.acquire() as conn:
-            return await conn.fetchrow("SELECT * FROM promo_codes WHERE code = $1", code)
-
-    async def create_promo_code(self, code: str, days: int, activations: int) -> None:
-        """Создать промокод"""
-        async with self.pool.acquire() as conn:
-            await conn.execute(
-                """INSERT INTO promo_codes (code, days, activations_left)
-                   VALUES ($1, $2, $3)
-                   ON CONFLICT (code) DO UPDATE SET
-                   days = $2, activations_left = $3
-                """,
-                code.upper(), days, activations
-            )
-
-    async def use_promo_code(self, code: str) -> bool:
-        """Использовать промокод (уменьшить активации)"""
-        async with self.pool.acquire() as conn:
-            async with conn.transaction():
-                promo = await conn.fetchrow("SELECT * FROM promo_codes WHERE code = $1", code)
-                if not promo or promo['activations_left'] <= 0:
-                    return False
-
-                await conn.execute(
-                    "UPDATE promo_codes SET activations_left = activations_left - 1 WHERE code = $1",
-                    code
-                )
-                
-                # Удалить если закончились активации
-                await conn.execute(
-                    "DELETE FROM promo_codes WHERE code = $1 AND activations_left <= 0",
-                    code
-                )
-                return True
-
-    # ===== Referrals =====
-
-    async def add_referral(self, referrer_id: int, referred_user_id: int) -> None:
-        """Добавить реферального пользователя"""
-        async with self.pool.acquire() as conn:
-            try:
-                await conn.execute(
-                    """INSERT INTO referrals (referrer_id, referred_user_id)
-                       VALUES ($1, $2)
-                       ON CONFLICT DO NOTHING
-                    """,
-                    referrer_id, referred_user_id
-                )
-            except asyncpg.UniqueViolationError:
-                pass
-
-    async def get_referrals(self, referrer_id: int) -> List[int]:
-        """Получить список рефералов"""
-        async with self.pool.acquire() as conn:
-            rows = await conn.fetch(
-                "SELECT referred_user_id FROM referrals WHERE referrer_id = $1",
-                referrer_id
-            )
-            return [row['referred_user_id'] for row in rows]
-
-    # ===== Paid Users =====
-
-    async def mark_user_paid(self, user_id: int, amount: int, invoice_id: str) -> None:
-        """Отметить пользователя как оплативого"""
-        async with self.pool.acquire() as conn:
-            await conn.execute(
-                """INSERT INTO paid_users (user_id, amount, invoice_id)
-                   VALUES ($1, $2, $3)
-                """,
-                user_id, amount, invoice_id
-            )
-
-    async def is_user_paid(self, user_id: int) -> bool:
-        """Проверить оплатил ли пользователь"""
-        async with self.pool.acquire() as conn:
-            result = await conn.fetchval(
-                "SELECT COUNT(*) FROM paid_users WHERE user_id = $1",
-                user_id
-            )
-            return result > 0
-
-    # ===== User Gifts =====
-
-    async def has_user_received_gift(self, user_id: int) -> bool:
-        """Проверить получил ли пользователь подарок"""
-        async with self.pool.acquire() as conn:
-            result = await conn.fetchval(
-                "SELECT COUNT(*) FROM user_gifts WHERE user_id = $1",
-                user_id
-            )
-            return result > 0
-
-    async def add_user_gift(self, user_id: int) -> None:
-        """Добавить подарок пользователю"""
-        async with self.pool.acquire() as conn:
-            try:
-                await conn.execute(
-                    "INSERT INTO user_gifts (user_id) VALUES ($1)",
-                    user_id
-                )
-            except asyncpg.UniqueViolationError:
-                pass
-
-    # ===== Utility Methods =====
-
-    async def get_all_user_ids(self) -> List[int]:
-        """Получить список всех user_id для рассылки"""
-        async with self.pool.acquire() as conn:
-            rows = await conn.fetch("SELECT user_id FROM user_clients")
-            return [row['user_id'] for row in rows]
-
-    async def get_paid_referrals(self, referrer_id: int) -> List[int]:
-        """Получить список оплативших рефералов"""
-        async with self.pool.acquire() as conn:
-            rows = await conn.fetch(
-                """SELECT DISTINCT p.user_id
-                   FROM paid_users p
-                   INNER JOIN referrals r ON p.user_id = r.referred_user_id
-                   WHERE r.referrer_id = $1
-                """,
-                referrer_id
-            )
-            return [row['user_id'] for row in rows]
-
-    async def get_referrer_id(self, user_id: int) -> Optional[int]:
-        """Получить ID пригласившего пользователя"""
-        async with self.pool.acquire() as conn:
-            result = await conn.fetchval(
-                "SELECT referrer_id FROM referrals WHERE referred_user_id = $1 LIMIT 1",
-                user_id
-            )
-            return result
-
-    # ===== Terms Acceptance =====
-
-    async def has_accepted_terms(self, user_id: int) -> bool:
-        """Проверить принял ли пользователь условия"""
-        try:
-            if not self.pool:
-                logger.error(f"❌ Database pool is None!")
-                return False
-
-            async with self.pool.acquire() as conn:
-                result = await conn.fetchval(
-                    "SELECT accepted_terms FROM user_terms_acceptance WHERE user_id = $1",
-                    user_id
-                )
-                accepted = result or False
-                logger.info(f"✅ Checking terms for user {user_id}: accepted={accepted}")
-                return accepted
-        except Exception as e:
-            logger.error(f"❌ Error checking terms for user {user_id}: {type(e).__name__}: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
-
-    async def set_terms_accepted(self, user_id: int) -> None:
-        """Отметить что пользователь принял условия"""
-        try:
-            if not self.pool:
-                logger.error(f"❌ Database pool is None!")
-                return
-
-            async with self.pool.acquire() as conn:
-                logger.info(f"💾 Saving terms for user {user_id}...")
-                await conn.execute(
-                    """INSERT INTO user_terms_acceptance (user_id, accepted_terms)
-                       VALUES ($1, TRUE)
-                       ON CONFLICT (user_id) DO UPDATE SET
-                       accepted_terms = TRUE
-                    """,
-                    user_id
-                )
-                logger.info(f"✅ Terms accepted saved successfully for user {user_id}")
-        except Exception as e:
-            logger.error(f"❌ Error saving terms acceptance for user {user_id}: {type(e).__name__}: {e}")
-            import traceback
-            traceback.print_exc()
+        INSERT INTO payments (tg_id, tariff_code, amount, created_at, provider, invoice_id)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (tg_id, tariff_code, amount, datetime.utcnow().isoformat(), provider, str(invoice_id)),
+        commit=True
+    )
 
 
-# Глобальный объект БД
-db = Database()
+def get_pending_payments():
+    """Получить все ожидающие платежи"""
+    return db_execute(
+        "SELECT id, tg_id, invoice_id, tariff_code FROM payments WHERE status = 'pending' AND provider = 'cryptobot'",
+        fetchall=True
+    )
+
+
+def get_last_pending_payment(tg_id: int):
+    """Получить последний ожидающий платеж пользователя"""
+    return db_execute(
+        "SELECT invoice_id, tariff_code FROM payments WHERE tg_id = ? AND status = 'pending' AND provider = 'cryptobot' ORDER BY id DESC LIMIT 1",
+        (tg_id,),
+        fetchone=True
+    )
+
+
+def update_payment_status(payment_id: int, status: str):
+    """Обновить статус платежа"""
+    db_execute(
+        "UPDATE payments SET status = ? WHERE id = ?",
+        (status, payment_id),
+        commit=True
+    )
+
+
+def update_payment_status_by_invoice(invoice_id: str, status: str):
+    """Обновить статус платежа по invoice_id"""
+    db_execute(
+        "UPDATE payments SET status = ? WHERE invoice_id = ?",
+        (status, invoice_id),
+        commit=True
+    )
+
+
+# Referral management
+def update_referral_count(tg_id: int):
+    """Увеличить счётчик рефералов"""
+    db_execute(
+        "UPDATE users SET referral_count = referral_count + 1 WHERE tg_id = ?",
+        (tg_id,),
+        commit=True
+    )
+
+
+def increment_active_referrals(tg_id: int):
+    """Увеличить счётчик активных рефералов"""
+    db_execute(
+        "UPDATE users SET active_referrals = active_referrals + 1 WHERE tg_id = ?",
+        (tg_id,),
+        commit=True
+    )
+
+
+def get_referral_stats(tg_id: int):
+    """Получить статистику рефералов пользователя"""
+    return db_execute(
+        "SELECT referral_count, active_referrals FROM users WHERE tg_id = ?",
+        (tg_id,),
+        fetchone=True
+    )
+
+
+def get_referrer(tg_id: int):
+    """Получить информацию о рефералите"""
+    return db_execute(
+        "SELECT referrer_id, first_payment FROM users WHERE tg_id = ?",
+        (tg_id,),
+        fetchone=True
+    )
+
+
+def mark_first_payment(tg_id: int):
+    """Отметить что пользователь сделал первый платёж"""
+    db_execute(
+        "UPDATE users SET first_payment = TRUE WHERE tg_id = ?",
+        (tg_id,),
+        commit=True
+    )
+
+
+# Gift management
+def is_gift_received(tg_id: int) -> bool:
+    """Проверить получил ли пользователь подарок"""
+    user = get_user(tg_id)
+    return user and user[8]  # gift_received column
+
+
+def mark_gift_received(tg_id: int):
+    """Отметить что пользователь получил подарок"""
+    db_execute(
+        "UPDATE users SET gift_received = TRUE WHERE tg_id = ?",
+        (tg_id,),
+        commit=True
+    )
+
+
+# Promo code management
+def get_promo_code(code: str):
+    """Получить информацию о промокоде"""
+    return db_execute(
+        "SELECT days, max_uses, used_count, active FROM promo_codes WHERE code = ?",
+        (code,),
+        fetchone=True
+    )
+
+
+def create_promo_code(code: str, days: int, max_uses: int):
+    """Создать новый промокод"""
+    db_execute(
+        "INSERT OR REPLACE INTO promo_codes (code, days, max_uses, active) VALUES (?, ?, ?, TRUE)",
+        (code.upper(), days, max_uses),
+        commit=True
+    )
+
+
+def increment_promo_usage(code: str):
+    """Увеличить счётчик использования промокода"""
+    db_execute(
+        "UPDATE promo_codes SET used_count = used_count + 1 WHERE code = ?",
+        (code,),
+        commit=True
+    )
