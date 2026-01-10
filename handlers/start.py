@@ -25,16 +25,16 @@ async def cmd_start(message: Message, state: FSMContext, bot: Bot):
     if len(args) > 1 and args[1].startswith("ref_"):
         try:
             referrer_id = int(args[1].split("_")[1])
-            db.update_referral_count(referrer_id)
+            await db.update_referral_count(referrer_id)
             logging.info(f"User {tg_id} joined via referral link from {referrer_id}")
         except (ValueError, IndexError):
             referrer_id = None
 
     # Создаём пользователя если его нет
-    db.create_user(tg_id, username, referrer_id)
+    await db.create_user(tg_id, username, referrer_id)
 
     # Проверяем принял ли пользователь условия
-    if not db.has_accepted_terms(tg_id):
+    if not await db.has_accepted_terms(tg_id):
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✅ Принять", callback_data="accept_terms")],
             [InlineKeyboardButton(text="📄 Прочитать соглашение", url=TELEGRAPH_AGREEMENT_URL)]
@@ -61,9 +61,21 @@ async def show_main_menu(message: Message):
     ])
 
     text = (
-        "🚀 Добро пожаловать в SPN VPN\n"
-        "Быстрый и стабильный VPN без логов\n"
-        "Работает на мобильных и ПК"
+        "<b>SPN — стабильное и быстрое интернет-соединение</b>\n\n"
+        "<b>Что вы получаете:</b>\n"
+        "• Улучшенную работу сайтов, мессенджеров и онлайн-сервисов\n"
+        "• Более стабильное соединение даже при перегрузках сети\n"
+        "• Поддержку Android, iOS, Windows, macOS и Linux\n"
+        "• Простое подключение за 1–2 минуты\n"
+        "• Защиту и оптимизацию интернет-трафика\n\n"
+        "<b>После активации:</b>\n"
+        "🔐 Персональный доступ SPN на выбранный срок\n"
+        "📥 Пошаговую инструкцию по подключению\n"
+        "🛟 Поддержку в Telegram\n"
+        "🌍 Свободную и стабильную работу в интернете\n\n"
+        "<b>Реферальная программа:</b>\n"
+        "👥 За каждого приглашённого пользователя,\n"
+        "активировавшего доступ, вы получаете +7 дней"
     )
 
     await message.answer(text, reply_markup=kb)

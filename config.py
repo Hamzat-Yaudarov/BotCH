@@ -38,7 +38,13 @@ CRYPTOBOT_API_URL = os.getenv("CRYPTOBOT_API_URL", "")
 #                DATABASE CONFIG
 # ────────────────────────────────────────────────
 
+# SQLite (deprecated, kept for backwards compatibility)
 DB_FILE = os.getenv("DB_FILE", "spn_vpn_bot.db")
+
+# Supabase PostgreSQL Config
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
+DATABASE_URL = os.getenv("DATABASE_URL", "")
 
 # ────────────────────────────────────────────────
 #                LOGGING CONFIG
