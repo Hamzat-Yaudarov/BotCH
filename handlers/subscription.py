@@ -1,4 +1,5 @@
 import logging
+import logging
 import aiohttp
 from datetime import datetime, timedelta, timezone
 from aiogram import Router, F
@@ -7,7 +8,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardBut
 from config import TARIFFS, DEFAULT_SQUAD_UUID
 from states import UserStates
 import database as db
-from services.remnawave import remnawave_get_subscription_url
+from services.remnawave import remnawave_get_subscription_url, remnawave_get_user_info
 from services.cryptobot import create_cryptobot_invoice, get_invoice_status, process_paid_invoice
 
 
@@ -39,6 +40,7 @@ async def process_tariff_choice(callback: CallbackQuery, state: FSMContext):
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💎 CryptoBot", callback_data="pay_cryptobot")],
+        [InlineKeyboardButton(text="💳 Yookassa", callback_data="pay_yookassa")],
         [InlineKeyboardButton(text="🔙 Назад", callback_data="buy_subscription")]
     ])
 
@@ -53,7 +55,7 @@ async def process_pay_cryptobot(callback: CallbackQuery, state: FSMContext):
     """Создать счёт в CryptoBot"""
     data = await state.get_data()
     tariff_code = data.get("tariff_code")
-    
+
     if not tariff_code:
         await callback.message.edit_text("Ошибка: тариф не выбран")
         await state.clear()
@@ -64,7 +66,7 @@ async def process_pay_cryptobot(callback: CallbackQuery, state: FSMContext):
 
     # Создаём счёт в CryptoBot
     invoice = await create_cryptobot_invoice(callback.bot, amount, tariff_code, callback.from_user.id)
-    
+
     if not invoice:
         await callback.message.edit_text("Ошибка создания счёта в CryptoBot. Попробуй позже.")
         await state.clear()
@@ -94,6 +96,36 @@ async def process_pay_cryptobot(callback: CallbackQuery, state: FSMContext):
         f"Сумма: {amount} ₽\n\n"
         "Оплати через CryptoBot. После оплаты бот автоматически активирует подписку.\n"
         "Если не активировалось — нажми «Проверить оплату»"
+    )
+
+    await callback.message.edit_text(text, reply_markup=kb)
+    await state.clear()
+
+
+@router.callback_query(F.data == "pay_yookassa")
+async def process_pay_yookassa(callback: CallbackQuery, state: FSMContext):
+    """Заглушка для оплаты через Yookassa"""
+    data = await state.get_data()
+    tariff_code = data.get("tariff_code")
+
+    if not tariff_code:
+        await callback.message.edit_text("Ошибка: тариф не выбран")
+        await state.clear()
+        return
+
+    tariff = TARIFFS[tariff_code]
+    amount = tariff["price"]
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="buy_subscription")]
+    ])
+
+    text = (
+        f"<b>💳 Yookassa</b>\n\n"
+        f"Тариф: {tariff_code}\n"
+        f"Сумма: {amount} ₽\n\n"
+        "⚠️ Способ оплаты Yookassa ещё находится в разработке.\n\n"
+        "Используй CryptoBot для оплаты или обратись в поддержку."
     )
 
     await callback.message.edit_text(text, reply_markup=kb)
@@ -160,26 +192,35 @@ async def process_my_subscription(callback: CallbackQuery):
         )
         return
 
-    # Получаем информацию о подписке
-    connector = aiohttp.TCPConnector(ssl=False)
-    async with aiohttp.ClientSession(connector=connector) as session:
-        sub_url = await remnawave_get_subscription_url(session, user[3])
+    # Получаем актуальную информацию о подписке из Remnawave
+    remaining_str = "неизвестно"
+    sub_url = "ошибка получения ссылки"
 
-    # Вычисляем оставшееся время
     try:
-        expire_at = user[5] or datetime.now(timezone.utc).isoformat()
-        exp_date = datetime.fromisoformat(expire_at.replace('Z', '+00:00'))
-        remaining = exp_date - datetime.now(timezone.utc)
-        
-        if remaining.total_seconds() <= 0:
-            remaining_str = "истекла"
-        else:
-            days = remaining.days
-            hours = remaining.seconds // 3600
-            minutes = (remaining.seconds % 3600) // 60
-            remaining_str = f"{days}д {hours}ч {minutes}м"
-    except Exception:
-        remaining_str = "неизвестно"
+        connector = aiohttp.TCPConnector(ssl=False)
+        async with aiohttp.ClientSession(connector=connector) as session:
+            # Получаем ссылку подписки
+            sub_url = await remnawave_get_subscription_url(session, user[3])
+
+            # Получаем информацию о пользователе (включая expireAt)
+            user_info = await remnawave_get_user_info(session, user[3])
+
+            if user_info and "expireAt" in user_info:
+                expire_at = user_info["expireAt"]
+                exp_date = datetime.fromisoformat(expire_at.replace('Z', '+00:00'))
+                remaining = exp_date - datetime.now(timezone.utc)
+
+                if remaining.total_seconds() <= 0:
+                    remaining_str = "истекла"
+                else:
+                    days = remaining.days
+                    hours = remaining.seconds // 3600
+                    minutes = (remaining.seconds % 3600) // 60
+                    remaining_str = f"{days}д {hours}ч {minutes}м"
+
+    except Exception as e:
+        logging.error(f"Error fetching subscription info from Remnawave: {e}")
+        remaining_str = "ошибка загрузки"
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔄 Продлить подписку", callback_data="buy_subscription")],
