@@ -1,5 +1,4 @@
-from aiogram import Router
-from aiogram.filters import F
+from aiogram import Router, F
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 import database as db
 

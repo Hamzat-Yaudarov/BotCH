@@ -1,6 +1,5 @@
 import logging
-from aiogram import Router
-from aiogram.filters import F
+from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from config import SUPPORT_URL
