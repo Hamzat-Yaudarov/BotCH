@@ -31,21 +31,21 @@ async def process_promo_input(message: Message, state: FSMContext):
     code = message.text.strip().upper()
     tg_id = message.from_user.id
 
-    if not await db.acquire_user_lock(tg_id):
+    if not db.acquire_user_lock(tg_id):
         await message.answer("Подожди пару секунд ⏳")
         return
 
     try:
         # Проверяем промокод в БД
-        promo = await db.get_promo_code(code)
+        promo = db.get_promo_code(code)
 
-        if not promo or not promo['active'] or promo['used_count'] >= promo['max_uses']:  # active и used_count < max_uses
+        if not promo or not promo[3] or promo[2] >= promo[1]:  # active и used_count < max_uses
             await message.answer("❌ Неверный или исчерпанный промокод")
             await state.clear()
             await show_main_menu(message)
             return
 
-        days = promo['days']
+        days = promo[0]
 
         # Создаём или получаем пользователя в Remnawave
         connector = aiohttp.TCPConnector(ssl=False)
@@ -73,11 +73,11 @@ async def process_promo_input(message: Message, state: FSMContext):
                 return
 
         # Обновляем промокод (увеличиваем счётчик использования)
-        await db.increment_promo_usage(code)
+        db.increment_promo_usage(code)
 
         # Обновляем подписку пользователя в БД
         new_until = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
-        await db.update_subscription(tg_id, uuid, username, new_until, DEFAULT_SQUAD_UUID)
+        db.update_subscription(tg_id, uuid, username, new_until, DEFAULT_SQUAD_UUID)
 
         # Отправляем успешное сообщение
         await message.answer(
@@ -91,9 +91,9 @@ async def process_promo_input(message: Message, state: FSMContext):
     except Exception as e:
         logging.error(f"Promo error: {e}")
         await message.answer("❌ Ошибка при применении промокода")
-
+    
     finally:
-        await db.release_user_lock(tg_id)
+        db.release_user_lock(tg_id)
 
     await state.clear()
     await show_main_menu(message)

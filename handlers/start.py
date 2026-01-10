@@ -25,16 +25,16 @@ async def cmd_start(message: Message, state: FSMContext, bot: Bot):
     if len(args) > 1 and args[1].startswith("ref_"):
         try:
             referrer_id = int(args[1].split("_")[1])
-            await db.update_referral_count(referrer_id)
+            db.update_referral_count(referrer_id)
             logging.info(f"User {tg_id} joined via referral link from {referrer_id}")
         except (ValueError, IndexError):
             referrer_id = None
 
     # Создаём пользователя если его нет
-    await db.create_user(tg_id, username, referrer_id)
+    db.create_user(tg_id, username, referrer_id)
 
     # Проверяем принял ли пользователь условия
-    if not await db.has_accepted_terms(tg_id):
+    if not db.has_accepted_terms(tg_id):
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✅ Принять", callback_data="accept_terms")],
             [InlineKeyboardButton(text="📄 Прочитать соглашение", url=TELEGRAPH_AGREEMENT_URL)]
@@ -61,7 +61,7 @@ async def show_main_menu(message: Message):
     ])
 
     text = (
-        "<b>SPN — стабильное и быстрое интернет-соединение</b>\n\n"
+        "SPN — стабильное и быстрое интернет-соединение\n\n"
         "<b>Что вы получаете:</b>\n"
         "• Улучшенную работу сайтов, мессенджеров и онлайн-сервисов\n"
         "• Более стабильное соединение даже при перегрузках сети\n"
@@ -74,8 +74,7 @@ async def show_main_menu(message: Message):
         "🛟 Поддержку в Telegram\n"
         "🌍 Свободную и стабильную работу в интернете\n\n"
         "<b>Реферальная программа:</b>\n"
-        "👥 За каждого приглашённого пользователя,\n"
-        "активировавшего доступ, вы получаете +7 дней"
+        "👥 За каждого приглашённого пользователя, активировавшего доступ, вы получаете +7 дней"
     )
 
     await message.answer(text, reply_markup=kb)

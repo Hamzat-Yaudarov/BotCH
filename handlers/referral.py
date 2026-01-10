@@ -16,9 +16,9 @@ async def process_referral(callback: CallbackQuery):
     referral_link = f"https://t.me/{bot_username}?start=ref_{tg_id}"
 
     # Получаем статистику рефералов
-    stats = await db.get_referral_stats(tg_id)
-    ref_count = stats['referral_count'] if stats else 0
-    active_count = stats['active_referrals'] if stats else 0
+    stats = db.get_referral_stats(tg_id)
+    ref_count = stats[0] if stats else 0
+    active_count = stats[1] if stats else 0
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")]
