@@ -1,35 +1,34 @@
-import psycopg2
-from psycopg2.extras import RealDictCursor
+import sqlite3
 import logging
-from config import DATABASE_URL
+from config import DB_FILE, SUPABASE_URL, SUPABASE_KEY
 
-
-def get_db_connection():
-    """Получить подключение к базе данных"""
-    try:
-        conn = psycopg2.connect(DATABASE_URL)
-        return conn
-    except Exception as e:
-        logging.error(f"Failed to connect to database: {e}")
-        raise
+# Импортируем Supabase клиент
+try:
+    import supabase_client as supabase_db
+    USE_SUPABASE = supabase_db.is_supabase_enabled()
+except ImportError:
+    USE_SUPABASE = False
 
 
 def init_db():
     """Инициализация базы данных с необходимыми таблицами"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
+    if USE_SUPABASE:
+        supabase_db.init_tables()
+        logging.info("Supabase tables initialized")
+    else:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
 
-    try:
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS users (
-                tg_id BIGINT PRIMARY KEY,
+                tg_id INTEGER PRIMARY KEY,
                 username TEXT,
                 accepted_terms BOOLEAN DEFAULT FALSE,
                 remnawave_uuid TEXT,
                 remnawave_username TEXT,
                 subscription_until TEXT,
                 squad_uuid TEXT,
-                referrer_id BIGINT,
+                referrer_id INTEGER,
                 gift_received BOOLEAN DEFAULT FALSE,
                 referral_count INTEGER DEFAULT 0,
                 active_referrals INTEGER DEFAULT 0,
@@ -40,8 +39,8 @@ def init_db():
 
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS payments (
-                id SERIAL PRIMARY KEY,
-                tg_id BIGINT,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tg_id INTEGER,
                 tariff_code TEXT,
                 amount REAL,
                 status TEXT DEFAULT 'pending',
@@ -63,14 +62,8 @@ def init_db():
         ''')
 
         conn.commit()
-        logging.info("Database initialized successfully")
-    except Exception as e:
-        logging.error(f"Error initializing database: {e}")
-        conn.rollback()
-        raise
-    finally:
-        cursor.close()
         conn.close()
+        logging.info("SQLite database initialized successfully")
 
 
 def db_execute(query, params=(), fetchone=False, fetchall=False, commit=False):
@@ -87,112 +80,116 @@ def db_execute(query, params=(), fetchone=False, fetchall=False, commit=False):
     Returns:
         Результат запроса или None
     """
-    conn = get_db_connection()
+    conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
+    cursor.execute(query, params)
     
-    try:
-        cursor.execute(query, params)
-        
-        if fetchone:
-            result = cursor.fetchone()
-        elif fetchall:
-            result = cursor.fetchall()
-        else:
-            result = None
-        
-        if commit:
-            conn.commit()
-        
-        return result
-    except Exception as e:
-        logging.error(f"Database query error: {e}")
-        conn.rollback()
-        raise
-    finally:
-        cursor.close()
-        conn.close()
+    if fetchone:
+        result = cursor.fetchone()
+    elif fetchall:
+        result = cursor.fetchall()
+    else:
+        result = None
+    
+    if commit:
+        conn.commit()
+    
+    conn.close()
+    return result
 
 
 def acquire_user_lock(tg_id: int) -> bool:
     """
     Атомарно блокирует пользователя.
     Возвращает True если блок получен, False если уже занят.
-    
+
     Args:
         tg_id: ID пользователя Telegram
-        
+
     Returns:
         True если удалось получить блокировку, False иначе
     """
-    conn = get_db_connection()
+    if USE_SUPABASE:
+        return supabase_db.acquire_user_lock(tg_id)
+
+    conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
 
-    try:
-        cursor.execute("""
-            UPDATE users
-            SET action_lock = 1
-            WHERE tg_id = %s AND action_lock = 0
-        """, (tg_id,))
+    cursor.execute("""
+        UPDATE users
+        SET action_lock = 1
+        WHERE tg_id = ? AND action_lock = 0
+    """, (tg_id,))
 
-        changed = cursor.rowcount
-        conn.commit()
-        return changed == 1
-    except Exception as e:
-        logging.error(f"Error acquiring lock: {e}")
-        conn.rollback()
-        return False
-    finally:
-        cursor.close()
-        conn.close()
+    changed = cursor.rowcount
+    conn.commit()
+    conn.close()
+
+    return changed == 1
 
 
 def release_user_lock(tg_id: int):
     """
     Освобождает блокировку пользователя
-    
+
     Args:
         tg_id: ID пользователя Telegram
     """
-    db_execute(
-        "UPDATE users SET action_lock = 0 WHERE tg_id = %s",
-        (tg_id,),
-        commit=True
-    )
+    if USE_SUPABASE:
+        supabase_db.release_user_lock(tg_id)
+    else:
+        db_execute(
+            "UPDATE users SET action_lock = 0 WHERE tg_id = ?",
+            (tg_id,),
+            commit=True
+        )
 
 
 # User management
 def get_user(tg_id: int):
     """Получить информацию о пользователе"""
-    return db_execute("SELECT * FROM users WHERE tg_id = %s", (tg_id,), fetchone=True)
+    if USE_SUPABASE:
+        return supabase_db.get_user(tg_id)
+    return db_execute("SELECT * FROM users WHERE tg_id = ?", (tg_id,), fetchone=True)
 
 
 def user_exists(tg_id: int) -> bool:
     """Проверить существует ли пользователь"""
-    result = db_execute("SELECT 1 FROM users WHERE tg_id = %s", (tg_id,), fetchone=True)
+    if USE_SUPABASE:
+        return supabase_db.user_exists(tg_id)
+    result = db_execute("SELECT 1 FROM users WHERE tg_id = ?", (tg_id,), fetchone=True)
     return result is not None
 
 
 def create_user(tg_id: int, username: str, referrer_id=None):
     """Создать или игнорировать пользователя"""
-    db_execute(
-        "INSERT INTO users (tg_id, username, referrer_id) VALUES (%s, %s, %s) ON CONFLICT (tg_id) DO NOTHING",
-        (tg_id, username, referrer_id),
-        commit=True
-    )
+    if USE_SUPABASE:
+        supabase_db.create_user(tg_id, username, referrer_id)
+    else:
+        db_execute(
+            "INSERT OR IGNORE INTO users (tg_id, username, referrer_id) VALUES (?, ?, ?)",
+            (tg_id, username, referrer_id),
+            commit=True
+        )
 
 
 # Terms and conditions
 def accept_terms(tg_id: int):
     """Пользователь принял условия использования"""
-    db_execute(
-        "UPDATE users SET accepted_terms = TRUE WHERE tg_id = %s",
-        (tg_id,),
-        commit=True
-    )
+    if USE_SUPABASE:
+        supabase_db.accept_terms(tg_id)
+    else:
+        db_execute(
+            "UPDATE users SET accepted_terms = TRUE WHERE tg_id = ?",
+            (tg_id,),
+            commit=True
+        )
 
 
 def has_accepted_terms(tg_id: int) -> bool:
     """Проверить принял ли пользователь условия"""
+    if USE_SUPABASE:
+        return supabase_db.has_accepted_terms(tg_id)
     user = get_user(tg_id)
     return user and user[2]  # accepted_terms column
 
@@ -200,15 +197,20 @@ def has_accepted_terms(tg_id: int) -> bool:
 # Subscription management
 def update_subscription(tg_id: int, uuid: str, username: str, subscription_until: str, squad_uuid: str):
     """Обновить подписку пользователя"""
-    db_execute(
-        "UPDATE users SET remnawave_uuid = %s, remnawave_username = %s, subscription_until = %s, squad_uuid = %s WHERE tg_id = %s",
-        (uuid, username, subscription_until, squad_uuid, tg_id),
-        commit=True
-    )
+    if USE_SUPABASE:
+        supabase_db.update_subscription(tg_id, uuid, username, subscription_until, squad_uuid)
+    else:
+        db_execute(
+            "UPDATE users SET remnawave_uuid = ?, remnawave_username = ?, subscription_until = ?, squad_uuid = ? WHERE tg_id = ?",
+            (uuid, username, subscription_until, squad_uuid, tg_id),
+            commit=True
+        )
 
 
 def has_subscription(tg_id: int) -> bool:
     """Проверить есть ли активная подписка"""
+    if USE_SUPABASE:
+        return supabase_db.has_subscription(tg_id)
     user = get_user(tg_id)
     return user and user[3] is not None  # remnawave_uuid column
 
@@ -216,19 +218,24 @@ def has_subscription(tg_id: int) -> bool:
 # Payment management
 def create_payment(tg_id: int, tariff_code: str, amount: float, provider: str, invoice_id: str):
     """Создать запись о платеже"""
-    from datetime import datetime
-    db_execute(
-        """
-        INSERT INTO payments (tg_id, tariff_code, amount, created_at, provider, invoice_id)
-        VALUES (%s, %s, %s, %s, %s, %s)
-        """,
-        (tg_id, tariff_code, amount, datetime.utcnow().isoformat(), provider, str(invoice_id)),
-        commit=True
-    )
+    if USE_SUPABASE:
+        supabase_db.create_payment(tg_id, tariff_code, amount, provider, invoice_id)
+    else:
+        from datetime import datetime
+        db_execute(
+            """
+            INSERT INTO payments (tg_id, tariff_code, amount, created_at, provider, invoice_id)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (tg_id, tariff_code, amount, datetime.utcnow().isoformat(), provider, str(invoice_id)),
+            commit=True
+        )
 
 
 def get_pending_payments():
     """Получить все ожидающие платежи"""
+    if USE_SUPABASE:
+        return supabase_db.get_pending_payments()
     return db_execute(
         "SELECT id, tg_id, invoice_id, tariff_code FROM payments WHERE status = 'pending' AND provider = 'cryptobot'",
         fetchall=True
@@ -237,8 +244,10 @@ def get_pending_payments():
 
 def get_last_pending_payment(tg_id: int):
     """Получить последний ожидающий платеж пользователя"""
+    if USE_SUPABASE:
+        return supabase_db.get_last_pending_payment(tg_id)
     return db_execute(
-        "SELECT invoice_id, tariff_code FROM payments WHERE tg_id = %s AND status = 'pending' AND provider = 'cryptobot' ORDER BY id DESC LIMIT 1",
+        "SELECT invoice_id, tariff_code FROM payments WHERE tg_id = ? AND status = 'pending' AND provider = 'cryptobot' ORDER BY id DESC LIMIT 1",
         (tg_id,),
         fetchone=True
     )
@@ -246,45 +255,59 @@ def get_last_pending_payment(tg_id: int):
 
 def update_payment_status(payment_id: int, status: str):
     """Обновить статус платежа"""
-    db_execute(
-        "UPDATE payments SET status = %s WHERE id = %s",
-        (status, payment_id),
-        commit=True
-    )
+    if USE_SUPABASE:
+        supabase_db.update_payment_status(payment_id, status)
+    else:
+        db_execute(
+            "UPDATE payments SET status = ? WHERE id = ?",
+            (status, payment_id),
+            commit=True
+        )
 
 
 def update_payment_status_by_invoice(invoice_id: str, status: str):
     """Обновить статус платежа по invoice_id"""
-    db_execute(
-        "UPDATE payments SET status = %s WHERE invoice_id = %s",
-        (status, invoice_id),
-        commit=True
-    )
+    if USE_SUPABASE:
+        supabase_db.update_payment_status_by_invoice(invoice_id, status)
+    else:
+        db_execute(
+            "UPDATE payments SET status = ? WHERE invoice_id = ?",
+            (status, invoice_id),
+            commit=True
+        )
 
 
 # Referral management
 def update_referral_count(tg_id: int):
     """Увеличить счётчик рефералов"""
-    db_execute(
-        "UPDATE users SET referral_count = referral_count + 1 WHERE tg_id = %s",
-        (tg_id,),
-        commit=True
-    )
+    if USE_SUPABASE:
+        supabase_db.update_referral_count(tg_id)
+    else:
+        db_execute(
+            "UPDATE users SET referral_count = referral_count + 1 WHERE tg_id = ?",
+            (tg_id,),
+            commit=True
+        )
 
 
 def increment_active_referrals(tg_id: int):
     """Увеличить счётчик активных рефералов"""
-    db_execute(
-        "UPDATE users SET active_referrals = active_referrals + 1 WHERE tg_id = %s",
-        (tg_id,),
-        commit=True
-    )
+    if USE_SUPABASE:
+        supabase_db.increment_active_referrals(tg_id)
+    else:
+        db_execute(
+            "UPDATE users SET active_referrals = active_referrals + 1 WHERE tg_id = ?",
+            (tg_id,),
+            commit=True
+        )
 
 
 def get_referral_stats(tg_id: int):
     """Получить статистику рефералов пользователя"""
+    if USE_SUPABASE:
+        return supabase_db.get_referral_stats(tg_id)
     return db_execute(
-        "SELECT referral_count, active_referrals FROM users WHERE tg_id = %s",
+        "SELECT referral_count, active_referrals FROM users WHERE tg_id = ?",
         (tg_id,),
         fetchone=True
     )
@@ -292,8 +315,10 @@ def get_referral_stats(tg_id: int):
 
 def get_referrer(tg_id: int):
     """Получить информацию о рефералите"""
+    if USE_SUPABASE:
+        return supabase_db.get_referrer(tg_id)
     return db_execute(
-        "SELECT referrer_id, first_payment FROM users WHERE tg_id = %s",
+        "SELECT referrer_id, first_payment FROM users WHERE tg_id = ?",
         (tg_id,),
         fetchone=True
     )
@@ -301,34 +326,44 @@ def get_referrer(tg_id: int):
 
 def mark_first_payment(tg_id: int):
     """Отметить что пользователь сделал первый платёж"""
-    db_execute(
-        "UPDATE users SET first_payment = TRUE WHERE tg_id = %s",
-        (tg_id,),
-        commit=True
-    )
+    if USE_SUPABASE:
+        supabase_db.mark_first_payment(tg_id)
+    else:
+        db_execute(
+            "UPDATE users SET first_payment = TRUE WHERE tg_id = ?",
+            (tg_id,),
+            commit=True
+        )
 
 
 # Gift management
 def is_gift_received(tg_id: int) -> bool:
     """Проверить получил ли пользователь подарок"""
+    if USE_SUPABASE:
+        return supabase_db.is_gift_received(tg_id)
     user = get_user(tg_id)
     return user and user[8]  # gift_received column
 
 
 def mark_gift_received(tg_id: int):
     """Отметить что пользователь получил подарок"""
-    db_execute(
-        "UPDATE users SET gift_received = TRUE WHERE tg_id = %s",
-        (tg_id,),
-        commit=True
-    )
+    if USE_SUPABASE:
+        supabase_db.mark_gift_received(tg_id)
+    else:
+        db_execute(
+            "UPDATE users SET gift_received = TRUE WHERE tg_id = ?",
+            (tg_id,),
+            commit=True
+        )
 
 
 # Promo code management
 def get_promo_code(code: str):
     """Получить информацию о промокоде"""
+    if USE_SUPABASE:
+        return supabase_db.get_promo_code(code)
     return db_execute(
-        "SELECT days, max_uses, used_count, active FROM promo_codes WHERE code = %s",
+        "SELECT days, max_uses, used_count, active FROM promo_codes WHERE code = ?",
         (code,),
         fetchone=True
     )
@@ -336,17 +371,23 @@ def get_promo_code(code: str):
 
 def create_promo_code(code: str, days: int, max_uses: int):
     """Создать новый промокод"""
-    db_execute(
-        "INSERT INTO promo_codes (code, days, max_uses, active) VALUES (%s, %s, %s, TRUE) ON CONFLICT (code) DO UPDATE SET days = %s, max_uses = %s, active = TRUE",
-        (code.upper(), days, max_uses, days, max_uses),
-        commit=True
-    )
+    if USE_SUPABASE:
+        supabase_db.create_promo_code(code, days, max_uses)
+    else:
+        db_execute(
+            "INSERT OR REPLACE INTO promo_codes (code, days, max_uses, active) VALUES (?, ?, ?, TRUE)",
+            (code.upper(), days, max_uses),
+            commit=True
+        )
 
 
 def increment_promo_usage(code: str):
     """Увеличить счётчик использования промокода"""
-    db_execute(
-        "UPDATE promo_codes SET used_count = used_count + 1 WHERE code = %s",
-        (code,),
-        commit=True
-    )
+    if USE_SUPABASE:
+        supabase_db.increment_promo_usage(code)
+    else:
+        db_execute(
+            "UPDATE promo_codes SET used_count = used_count + 1 WHERE code = ?",
+            (code,),
+            commit=True
+        )

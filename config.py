@@ -38,7 +38,11 @@ CRYPTOBOT_API_URL = os.getenv("CRYPTOBOT_API_URL", "")
 #                DATABASE CONFIG
 # ────────────────────────────────────────────────
 
-# PostgreSQL/Neon database connection string (from environment variable)
+DB_FILE = os.getenv("DB_FILE", "spn_vpn_bot.db")
+
+# Supabase config
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 
 # ────────────────────────────────────────────────
